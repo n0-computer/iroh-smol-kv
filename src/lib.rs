@@ -795,10 +795,17 @@ mod util {
 
 #[cfg(feature = "filter-parser")]
 mod peg_parser {
-    use std::{collections::HashSet, ops::Bound, str::FromStr, time::SystemTime, fmt::{self, Display}};
+    use std::{
+        collections::HashSet,
+        fmt::{self, Display},
+        ops::Bound,
+        str::FromStr,
+        time::SystemTime,
+    };
 
     use bytes::Bytes;
     use iroh::PublicKey;
+
     use crate::{api::Filter, util::from_nanos};
 
     impl Display for Filter {
@@ -872,7 +879,7 @@ mod peg_parser {
                 }
             }
 
-            write!(f, "{}", parts.join(" | "))
+            write!(f, "{}", parts.join(" & "))
         }
     }
 
@@ -914,7 +921,7 @@ mod peg_parser {
     peg::parser! {
         grammar filter_parser() for str {
             pub rule filter() -> Filter
-                = _ parts:(filter_part() ** (_ "|" _)) _ {
+                = _ parts:(filter_part() ** (_ "&" _)) _ {
                     let mut filter = Filter::ALL;
                     for part in parts {
                         match part {
@@ -999,16 +1006,14 @@ mod peg_parser {
                 = s:$(['0'..='9' | 'a'..='f' | 'A'..='F']+) { s.to_string() }
 
             rule timestamp() -> Option<SystemTime>
-                = s:$(
-                    ['0'..='9']+ "-" ['0'..='9']+ "-" ['0'..='9']+
-                    "T"
-                    ['0'..='9' | ':' | '.' | 'Z' | '+' | '-']+
-                ) {
+                = s:timestamp_chars() {
                     use chrono::{DateTime, Utc};
-                    DateTime::parse_from_rfc3339(s)
-                        .map(|dt| dt.with_timezone(&Utc).into())
-                        .ok()
+                    DateTime::parse_from_rfc3339(s.trim())
+                        .map(|dt| dt.with_timezone(&Utc).into()).ok()
                 }
+
+            rule timestamp_chars() -> &'input str
+                = $([^ '&' | ' ' | '\t' | '\n' | '\r' | '.']+)
 
             rule _() = [' ' | '\t' | '\n' | '\r']*
         }

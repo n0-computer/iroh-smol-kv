@@ -624,6 +624,7 @@ pub mod api {
                                 let gossip_msg = GossipMessage::SignedValue(msg.scope.clone(), msg.key.clone(), msg.value.clone());
                                 let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
                                 self.sender.broadcast(gossip_msg).await.ok();
+                                self.broadcast_tx.send((msg.scope, msg.key.clone(), msg.value.clone())).ok();
                                 msg.tx.send(()).await.ok();
                             }
                             Message::Get(msg) => {

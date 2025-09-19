@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use clap::Parser;
-use iroh::{SecretKey, Watcher};
+use iroh::{PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_docs_mini::{
     Config,
@@ -25,7 +25,10 @@ enum Command {
     /// /put key value
     Put { key: String, value: String },
     /// /get key
-    Get { key: String },
+    Get {
+        scope: Option<PublicKey>,
+        key: String,
+    },
     /// /peers node_ticket*
     Join { peers: Vec<NodeTicket> },
     /// /iter
@@ -56,6 +59,11 @@ impl Command {
                 value: value.to_string(),
             },
             ["/get", key] => Command::Get {
+                scope: None,
+                key: key.to_string(),
+            },
+            ["/get", scope, key] => Command::Get {
+                scope: Some(PublicKey::from_str(scope).ok()?),
                 key: key.to_string(),
             },
             ["/join", peers @ ..] => {
@@ -181,9 +189,10 @@ async fn main() -> n0_snafu::Result<()> {
                         println!("Put key: {}, value: {}", key, value);
                         ws.put(key, value).await.e()?;
                     }
-                    Command::Get { key } => {
-                        let res = api.get(node_id, key.clone()).await.e()?;
-                        println!("Get key: {}, value: {:?}", key, res);
+                    Command::Get { scope, key } => {
+                        let scope = scope.unwrap_or(node_id);
+                        let res = api.get(scope, key.clone()).await.e()?;
+                        println!("Get key: {} {}, value: {:?}", scope.fmt_short(), key, res);
                     }
                     Command::Join { peers } => {
                         let ids = peers.iter().map(|p| p.node_addr().node_id).collect::<Vec<_>>();
@@ -234,7 +243,7 @@ r#"Available commands:
 /quit                    - Exit the program
 /help                    - Show this help message
 
-filter syntax:
+Filter syntax:
     You can filter by scope, key and timestamp.
 
     Key filters:

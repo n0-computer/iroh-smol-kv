@@ -237,8 +237,8 @@ r#"Available commands:
 /put <key> <value>       - Store a key-value pair
 /get <key>               - Retrieve the value for a key
 /join <node_ticket>*     - Join peers by their node tickets
-/iter [filter]           - Iterate over key-value pairs with an optional filter
-/subscribe [filter]      - Subscribe to updates with an optional filter
+/iter <filter>?          - Iterate over key-value pairs with an optional filter
+/subscribe <filter>?     - Subscribe to updates with an optional filter
 /unsubscribe <id>        - Unsubscribe from a subscription by its ID
 /quit                    - Exit the program
 /help                    - Show this help message

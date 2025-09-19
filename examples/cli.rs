@@ -36,6 +36,8 @@ enum Command {
     Unsubscribe { id: usize },
     /// /quit
     Quit,
+    /// /help
+    Help,
     /// Nothing of the above
     Other { raw: String },
 }
@@ -74,6 +76,7 @@ impl Command {
                 id: id.parse().ok()?,
             },
             ["/quit"] => Command::Quit,
+            ["/help"] => Command::Help,
             _ => return None,
         })
     }
@@ -218,6 +221,38 @@ async fn main() -> n0_snafu::Result<()> {
                     Command::Quit => {
                         println!("Bye!");
                         break;
+                    }
+                    Command::Help => {
+                        println!(
+r#"Available commands:
+/put <key> <value>       - Store a key-value pair
+/get <key>               - Retrieve the value for a key
+/join <node_ticket>*     - Join peers by their node tickets
+/iter [filter]           - Iterate over key-value pairs with an optional filter
+/subscribe [filter]      - Subscribe to updates with an optional filter
+/unsubscribe <id>        - Unsubscribe from a subscription by its ID
+/quit                    - Exit the program
+/help                    - Show this help message
+
+filter syntax:
+    You can filter by scope, key and timestamp.
+
+    Key filters:
+        key="a"      // string literals
+        key=FEDA     // hex literals
+        key="a".."b" // key range, can be open on either side, or inclusive with ..=
+        key="a"*     // prefix match
+
+    Timestamp filters:
+        time=2023-01-01T00:00:00Z.. // open time range
+    
+    Scope filters:
+        scope={{76dbdc2a2fbeace1986f7c48e33963c08086fc980ff6bd84070cf98887df6b8d}} // comma separated list of public keys
+
+    Filters can only be combined with AND (&). You can have only one filter of each type.
+        key="a"* & time=2023-01-01T00:00:00Z..
+"#
+                        );
                     }
                     Command::Other { raw } => {
                         println!("Unrecognized command: {}", raw);

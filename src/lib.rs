@@ -56,7 +56,7 @@ pub mod api {
     };
 
     use bytes::{Bytes, BytesMut};
-    use iroh::{PublicKey, SecretKey};
+    use iroh::{NodeId, PublicKey, SecretKey};
     use iroh_gossip::api::{Event, GossipReceiver, GossipSender, GossipTopic};
     use irpc::{
         channel::{mpsc, oneshot},
@@ -122,6 +122,11 @@ pub mod api {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
+    pub struct JoinPeers {
+        pub peers: Vec<NodeId>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
     #[rpc_requests(message = Message)]
     enum Proto {
         #[rpc(tx = oneshot::Sender<()>)]
@@ -130,6 +135,8 @@ pub mod api {
         Get(Get),
         #[rpc(tx = mpsc::Sender<SubscribeResponse>)]
         Subscribe(Subscribe),
+        #[rpc(tx = oneshot::Sender<()>)]
+        JoinPeers(JoinPeers),
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,7 +160,10 @@ pub mod api {
             key: (Bound::Unbounded, Bound::Excluded(Bytes::new())),
             timestamp: (Bound::Unbounded, Bound::Excluded(0)),
         };
-        pub fn scope(self, scope: impl IntoIterator<Item = PublicKey>) -> Self {
+        pub fn scope(self, scope: PublicKey) -> Self {
+            self.scopes(Some(scope))
+        }
+        pub fn scopes(self, scope: impl IntoIterator<Item = PublicKey>) -> Self {
             let scope = scope.into_iter().collect();
             Self {
                 scope: Some(scope),
@@ -182,7 +192,7 @@ pub mod api {
                 timestamp: self.timestamp,
             }
         }
-        pub fn timestamp(self, range: impl RangeBounds<SystemTime>) -> Self {
+        pub fn timestamps(self, range: impl RangeBounds<SystemTime>) -> Self {
             let start = range.start_bound().map(to_nanos);
             let end = range.end_bound().map(to_nanos);
             Self {
@@ -331,6 +341,16 @@ pub mod api {
                 filter: Filter::ALL,
             };
             IterResult(Box::pin(self.0.server_streaming(subscribe, 32)))
+        }
+
+        pub fn join_peers(
+            &self,
+            peers: impl IntoIterator<Item = NodeId>,
+        ) -> impl n0_future::Future<Output = Result<(), irpc::Error>> {
+            let peers = JoinPeers {
+                peers: peers.into_iter().collect(),
+            };
+            self.0.rpc(peers)
         }
     }
 
@@ -590,6 +610,14 @@ pub mod api {
                                 };
                                 tasks.push(Box::pin(Self::handle_subscribe(msg.tx, filter, current, future)));
                             }
+                            Message::JoinPeers(msg) => {
+                                let res = self.sender.join_peers(msg.peers.clone()).await;
+                                msg.tx.send(()).await.ok();
+                                if let Err(e) = res {
+                                    error!("Error joining peers: {:?}", e);
+                                    break;
+                                }
+                            }
                         }
                     }
                     msg = self.receiver.next() => {
@@ -610,6 +638,10 @@ pub mod api {
                             Event::NeighborUp(peer) => {
                                 trace!("New peer {}, starting fast anti-entropy", peer.fmt_short());
                                 anti_entropy.set(Self::anti_entropy(self.state.snapshot(), self.sender.clone(), self.config.fast_anti_entropy_interval));
+                                continue;
+                            },
+                            Event::NeighborDown(peer) => {
+                                trace!("Peer down: {}, goodbye!", peer.fmt_short());
                                 continue;
                             },
                             e => {

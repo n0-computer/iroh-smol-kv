@@ -45,51 +45,6 @@ enum Command {
     Other { raw: String },
 }
 
-impl Command {
-    fn parse(line: &str) -> Self {
-        Self::parse_impl(line).unwrap_or(Command::Other {
-            raw: line.to_string(),
-        })
-    }
-    fn parse_impl(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
-        Some(match parts.as_slice() {
-            ["/put", key, value] => Command::Put {
-                key: key.to_string(),
-                value: value.to_string(),
-            },
-            ["/get", key] => Command::Get {
-                scope: None,
-                key: key.to_string(),
-            },
-            ["/get", scope, key] => Command::Get {
-                scope: Some(PublicKey::from_str(scope).ok()?),
-                key: key.to_string(),
-            },
-            ["/join", peers @ ..] => {
-                let peers = peers
-                    .iter()
-                    .map(|s| NodeTicket::from_str(s))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                Command::Join { peers }
-            }
-            ["/iter", filter @ ..] => Command::Iter {
-                filter: Filter::from_str(&filter.join(" ")).ok()?,
-            },
-            ["/subscribe", filter @ ..] => Command::Subscribe {
-                filter: Filter::from_str(&filter.join(" ")).ok()?,
-            },
-            ["/unsubscribe", id] => Command::Unsubscribe {
-                id: id.parse().ok()?,
-            },
-            ["/quit"] => Command::Quit,
-            ["/help"] => Command::Help,
-            _ => return None,
-        })
-    }
-}
-
 fn utf8_or_hex(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         format!("\"{s}\"")
@@ -184,7 +139,7 @@ async fn main() -> n0_snafu::Result<()> {
                 let Some(line) = line.e()? else {
                     break;
                 };
-                match Command::parse(&line) {
+                match Command::from_str(&line).unwrap_or(Command::Other { raw: line.clone() }) {
                     Command::Put { key, value } => {
                         println!("Put key: {}, value: {}", key, value);
                         ws.put(key, value).await.e()?;
@@ -272,4 +227,133 @@ Filter syntax:
     }
     // we need to exit because next_line hangs forever otherwise.
     std::process::exit(0);
+}
+
+mod command_parser {
+    use bytes::Bytes;
+    use iroh_docs_mini::api::Filter;
+    use iroh::PublicKey;
+    use std::str::FromStr;
+    use iroh_base::ticket::NodeTicket;
+    use super::Command;
+
+    peg::parser! {
+        grammar cmd_parser() for str {
+            pub rule command() -> Command
+                = _ cmd:(
+                    set_cmd() / get_cmd() / join_cmd() / iter_cmd() / 
+                    subscribe_cmd() / unsubscribe_cmd() / quit_cmd() / help_cmd()
+                ) _ { cmd }
+
+            rule set_cmd() -> Command
+                = "/set" _ key:key_value() _ "=" _ value:key_value() {
+                    Command::Put { 
+                        key: bytes_to_string(key), 
+                        value: bytes_to_string(value) 
+                    }
+                }
+
+            rule get_cmd() -> Command
+                = "/get" _ scope:public_key()? _ key:key_value() {
+                    Command::Get {
+                        scope,
+                        key: bytes_to_string(key),
+                    }
+                }
+
+            rule join_cmd() -> Command
+                = "/join" _ peers:(peer_ticket() ** _) {
+                    Command::Join { peers }
+                }
+
+            rule iter_cmd() -> Command
+                = "/iter" _ filter_str:$([^'\n']*) {?
+                    let filter = if filter_str.trim().is_empty() {
+                        Filter::ALL
+                    } else {
+                        Filter::from_str(filter_str).map_err(|_| "invalid filter")?
+                    };
+                    Ok(Command::Iter { filter })
+                }
+
+            rule subscribe_cmd() -> Command
+                = "/subscribe" _ filter_str:$([^'\n']*) {?
+                    let filter = if filter_str.trim().is_empty() {
+                        Filter::ALL
+                    } else {
+                        Filter::from_str(filter_str).map_err(|_| "invalid filter")?
+                    };
+                    Ok(Command::Subscribe { filter })
+                }
+
+            rule unsubscribe_cmd() -> Command
+                = "/unsubscribe" _ id:number() { Command::Unsubscribe { id } }
+
+            rule quit_cmd() -> Command
+                = "/quit" { Command::Quit }
+
+            rule help_cmd() -> Command
+                = "/help" { Command::Help }
+
+            // Reused string parsing from filter parser
+            rule key_value() -> Bytes
+                = quoted_string() / hex_bytes()
+
+            rule quoted_string() -> Bytes
+                = "\"" s:string_content() "\"" { Bytes::from(s) }
+
+            rule string_content() -> String
+                = chars:string_char()* { chars.into_iter().collect() }
+
+            rule string_char() -> char
+                = "\\\\" { '\\' }
+                / "\\\"" { '"' }
+                / "\\n" { '\n' }
+                / "\\t" { '\t' }
+                / "\\r" { '\r' }
+                / c:$([_]) {? 
+                    let ch = c.chars().next().unwrap();
+                    if ch == '"' || ch == '\\' {
+                        Err("quote or backslash")
+                    } else {
+                        Ok(ch)
+                    }
+                }
+
+            rule hex_bytes() -> Bytes
+                = s:$(['0'..='9' | 'a'..='f' | 'A'..='F']+) {?
+                    hex::decode(s)
+                        .map(Bytes::from)
+                        .map_err(|_| "invalid hex")
+                }
+
+            rule peer_ticket() -> NodeTicket
+                = s:$([^ ' ' | '\t' | '\n' | '\r']+) {?
+                    NodeTicket::from_str(s).map_err(|_| "invalid node ticket")
+                }
+
+            rule public_key() -> PublicKey
+                = s:$([^ ' ' | '\t' | '\n' | '\r']+) {?
+                    PublicKey::from_str(s).map_err(|_| "invalid public key")
+                }
+
+            rule number() -> usize
+                = n:$(['0'..='9']+) {?
+                    n.parse().map_err(|_| "invalid number")
+                }
+
+            rule _() = [' ' | '\t' | '\n' | '\r']*
+        }
+    }
+
+    fn bytes_to_string(bytes: Bytes) -> String {
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    impl FromStr for Command {
+        type Err = String;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            cmd_parser::command(s).map_err(|e| format!("Parse error: {}", e))
+        }
+    }
 }

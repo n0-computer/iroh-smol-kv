@@ -1622,33 +1622,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iroh-docs-mini"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "clap",
- "ed25519-dalek",
- "hex",
- "iroh",
- "iroh-base",
- "iroh-gossip",
- "irpc",
- "n0-future 0.2.0",
- "n0-snafu",
- "peg",
- "postcard",
- "rand 0.8.5",
- "rpds",
- "serde",
- "serde-big-array",
- "snafu",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "iroh-gossip"
 version = "0.91.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1809,6 +1782,33 @@ dependencies = [
  "webpki-roots 0.26.11",
  "ws_stream_wasm",
  "z32",
+]
+
+[[package]]
+name = "iroh-smol-kv"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "iroh",
+ "iroh-base",
+ "iroh-gossip",
+ "irpc",
+ "n0-future 0.2.0",
+ "n0-snafu",
+ "peg",
+ "postcard",
+ "rand 0.8.5",
+ "rpds",
+ "serde",
+ "serde-big-array",
+ "snafu",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

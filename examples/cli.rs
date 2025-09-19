@@ -1,13 +1,15 @@
 use std::{collections::BTreeMap, str::FromStr};
 
+use bytes::Bytes;
 use clap::Parser;
 use iroh::{PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
-use iroh_docs_mini::{
+use iroh_gossip::{net::Gossip, proto::TopicId};
+use iroh_smol_kv::{
     Config,
     api::{self, Filter, Subscribe, SubscribeResult},
+    util::format_bytes,
 };
-use iroh_gossip::{net::Gossip, proto::TopicId};
 use n0_future::{StreamExt, task::AbortOnDropHandle};
 use n0_snafu::ResultExt;
 use tokio::{
@@ -23,11 +25,11 @@ struct Args {
 #[derive(Debug)]
 enum Command {
     /// /put key value
-    Put { key: String, value: String },
+    Put { key: Bytes, value: Bytes },
     /// /get key
     Get {
         scope: Option<PublicKey>,
-        key: String,
+        key: Bytes,
     },
     /// /peers node_ticket*
     Join { peers: Vec<NodeTicket> },
@@ -45,14 +47,6 @@ enum Command {
     Other { raw: String },
 }
 
-fn utf8_or_hex(bytes: &[u8]) -> String {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        format!("\"{s}\"")
-    } else {
-        hex::encode(bytes)
-    }
-}
-
 async fn handle_subscription(id: usize, sub: SubscribeResult) {
     let stream = sub.stream();
     tokio::pin!(stream);
@@ -63,8 +57,8 @@ async fn handle_subscription(id: usize, sub: SubscribeResult) {
                     "#{}: ({},{},{})",
                     id,
                     scope.fmt_short(),
-                    utf8_or_hex(&key),
-                    utf8_or_hex(&value.value)
+                    format_bytes(&key),
+                    format_bytes(&value.value)
                 );
             }
             Err(e) => {
@@ -141,13 +135,13 @@ async fn main() -> n0_snafu::Result<()> {
                 };
                 match Command::from_str(&line).unwrap_or(Command::Other { raw: line.clone() }) {
                     Command::Put { key, value } => {
-                        println!("Put key: {}, value: {}", key, value);
+                        println!("Put key: {}, value: {}", format_bytes(&key), format_bytes(&value));
                         ws.put(key, value).await.e()?;
                     }
                     Command::Get { scope, key } => {
                         let scope = scope.unwrap_or(node_id);
                         let res = api.get(scope, key.clone()).await.e()?;
-                        println!("Get key: {} {}, value: {:?}", scope.fmt_short(), key, res);
+                        println!("Get key: {} {}, value: {:?}", scope.fmt_short(), format_bytes(&key), res);
                     }
                     Command::Join { peers } => {
                         let ids = peers.iter().map(|p| p.node_addr().node_id).collect::<Vec<_>>();
@@ -161,7 +155,7 @@ async fn main() -> n0_snafu::Result<()> {
                         println!("#{id} Iter {filter}");
                         let items = api.iter_with_opts(filter).collect::<Vec<_>>().await.e()?;
                         for (s, k, v) in items {
-                            println!("#{id} ({},{},{})", s.fmt_short(), utf8_or_hex(&k), utf8_or_hex(&v));
+                            println!("#{id} ({},{},{})", s.fmt_short(), format_bytes(&k), format_bytes(&v));
                         }
                     }
                     Command::Subscribe { filter } => {
@@ -189,14 +183,19 @@ async fn main() -> n0_snafu::Result<()> {
                     Command::Help => {
                         println!(
 r#"Available commands:
-/put <key> <value>       - Store a key-value pair
-/get <key>               - Retrieve the value for a key
+/set <key>=<value>       - Store a key-value pair
+/get <key>               - Retrieve the value for a key in your own scope
+/get <scope> <key>       - Retrieve the value for a key in a specific scope
 /join <node_ticket>*     - Join peers by their node tickets
 /iter <filter>?          - Iterate over key-value pairs with an optional filter
 /subscribe <filter>?     - Subscribe to updates with an optional filter
 /unsubscribe <id>        - Unsubscribe from a subscription by its ID
 /quit                    - Exit the program
 /help                    - Show this help message
+
+Key and values can be specified as either:
+    - String literals enclosed in double quotes (e.g., "my_key"), with support for escape sequences (\n, \t, \", \\)
+    - Hexadecimal literals (e.g., FEDA)
 
 Filter syntax:
     You can filter by scope, key and timestamp.
@@ -230,26 +229,28 @@ Filter syntax:
 }
 
 mod command_parser {
-    use bytes::Bytes;
-    use iroh_docs_mini::api::Filter;
-    use iroh::PublicKey;
     use std::str::FromStr;
+
+    use bytes::Bytes;
+    use iroh::PublicKey;
     use iroh_base::ticket::NodeTicket;
+    use iroh_smol_kv::api::Filter;
+
     use super::Command;
 
     peg::parser! {
         grammar cmd_parser() for str {
             pub rule command() -> Command
                 = _ cmd:(
-                    set_cmd() / get_cmd() / join_cmd() / iter_cmd() / 
+                    set_cmd() / get_cmd() / join_cmd() / iter_cmd() /
                     subscribe_cmd() / unsubscribe_cmd() / quit_cmd() / help_cmd()
                 ) _ { cmd }
 
             rule set_cmd() -> Command
                 = "/set" _ key:key_value() _ "=" _ value:key_value() {
-                    Command::Put { 
-                        key: bytes_to_string(key), 
-                        value: bytes_to_string(value) 
+                    Command::Put {
+                        key,
+                        value,
                     }
                 }
 
@@ -257,7 +258,7 @@ mod command_parser {
                 = "/get" _ scope:public_key()? _ key:key_value() {
                     Command::Get {
                         scope,
-                        key: bytes_to_string(key),
+                        key,
                     }
                 }
 
@@ -311,7 +312,7 @@ mod command_parser {
                 / "\\n" { '\n' }
                 / "\\t" { '\t' }
                 / "\\r" { '\r' }
-                / c:$([_]) {? 
+                / c:$([_]) {?
                     let ch = c.chars().next().unwrap();
                     if ch == '"' || ch == '\\' {
                         Err("quote or backslash")
@@ -344,10 +345,6 @@ mod command_parser {
 
             rule _() = [' ' | '\t' | '\n' | '\r']*
         }
-    }
-
-    fn bytes_to_string(bytes: Bytes) -> String {
-        String::from_utf8_lossy(&bytes).to_string()
     }
 
     impl FromStr for Command {

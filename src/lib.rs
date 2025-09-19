@@ -737,7 +737,7 @@ impl Default for Config {
     }
 }
 
-mod util {
+pub mod util {
     use std::time::{Duration, SystemTime};
 
     use bytes::{Bytes, BytesMut};
@@ -750,7 +750,7 @@ mod util {
     ///
     /// It will also not work for dates before the unix epoch, but that's not a
     /// problem for our use case.
-    pub fn to_nanos(t: &SystemTime) -> u64 {
+    pub(crate) fn to_nanos(t: &SystemTime) -> u64 {
         t.duration_since(SystemTime::UNIX_EPOCH)
             .expect("system time before unix epoch")
             .as_nanos()
@@ -758,15 +758,15 @@ mod util {
             .expect("u64 nanos")
     }
 
-    pub fn current_timestamp() -> u64 {
+    pub(crate) fn current_timestamp() -> u64 {
         to_nanos(&SystemTime::now())
     }
 
-    pub fn from_nanos(nanos: u64) -> SystemTime {
+    pub(crate) fn from_nanos(nanos: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
     }
 
-    pub fn postcard_ser<T: Serialize>(value: &T, buf: &mut BytesMut) -> Bytes {
+    pub(crate) fn postcard_ser<T: Serialize>(value: &T, buf: &mut BytesMut) -> Bytes {
         buf.clear();
         postcard::to_extend(value, ExtendBytesMut(buf)).expect("value to buf");
         buf.split().into()
@@ -782,7 +782,7 @@ mod util {
         }
     }
 
-    pub fn next_prefix(bytes: &mut [u8]) -> bool {
+    pub(crate) fn next_prefix(bytes: &mut [u8]) -> bool {
         for byte in bytes.iter_mut().rev() {
             if *byte < 255 {
                 *byte += 1;
@@ -791,6 +791,34 @@ mod util {
             *byte = 0;
         }
         false
+    }
+
+    pub fn format_bytes(bytes: &[u8]) -> String {
+        if bytes.is_empty() {
+            return "\"\"".to_string();
+        }
+        let Ok(s) = std::str::from_utf8(bytes) else {
+            return hex::encode(bytes);
+        };
+        if s.chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r')
+        {
+            return hex::encode(bytes);
+        }
+        format!("\"{}\"", escape_string(s))
+    }
+
+    pub fn escape_string(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                '"' => "\\\"".to_string(),
+                '\\' => "\\\\".to_string(),
+                '\n' => "\\n".to_string(),
+                '\t' => "\\t".to_string(),
+                '\r' => "\\r".to_string(),
+                c => c.to_string(),
+            })
+            .collect()
     }
 }
 
@@ -807,7 +835,10 @@ mod peg_parser {
     use bytes::Bytes;
     use iroh::PublicKey;
 
-    use crate::{api::Filter, util::from_nanos};
+    use crate::{
+        api::Filter,
+        util::{format_bytes, from_nanos},
+    };
 
     impl Display for Filter {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -882,33 +913,6 @@ mod peg_parser {
 
             write!(f, "{}", parts.join(" & "))
         }
-    }
-
-    fn format_bytes(bytes: &[u8]) -> String {
-        if bytes.is_empty() {
-            return "\"\"".to_string();
-        }
-
-        // Always quote strings, but use hex for non-UTF8 data
-        if let Ok(s) = std::str::from_utf8(bytes) {
-            format!("\"{}\"", escape_string(s))
-        } else {
-            // Binary data, encode as hex (no quotes for hex)
-            hex::encode(bytes)
-        }
-    }
-
-    fn escape_string(s: &str) -> String {
-        s.chars()
-            .map(|c| match c {
-                '"' => "\\\"".to_string(),
-                '\\' => "\\\\".to_string(),
-                '\n' => "\\n".to_string(),
-                '\t' => "\\t".to_string(),
-                '\r' => "\\r".to_string(),
-                c => c.to_string(),
-            })
-            .collect()
     }
 
     impl FromStr for Filter {

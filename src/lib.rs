@@ -71,7 +71,7 @@ pub mod api {
     use crate::{
         Config, Entry, GossipMessage,
         proto::{SignedValue, SigningData},
-        util::{current_timestamp, postcard_ser, to_nanos},
+        util::{current_timestamp, next_prefix, postcard_ser, to_nanos},
     };
 
     #[derive(Debug, Snafu)]
@@ -160,9 +160,11 @@ pub mod api {
             key: (Bound::Unbounded, Bound::Excluded(Bytes::new())),
             timestamp: (Bound::Unbounded, Bound::Excluded(0)),
         };
+        /// Sets the scope filter to a single public key.
         pub fn scope(self, scope: PublicKey) -> Self {
             self.scopes(Some(scope))
         }
+        /// Sets the scope filter to a set of public keys.
         pub fn scopes(self, scope: impl IntoIterator<Item = PublicKey>) -> Self {
             let scope = scope.into_iter().collect();
             Self {
@@ -171,6 +173,7 @@ pub mod api {
                 timestamp: self.timestamp,
             }
         }
+        /// Sets the key filter to a single key.
         pub fn key(self, key: impl Into<Bytes>) -> Self {
             let key = key.into();
             Self {
@@ -179,6 +182,7 @@ pub mod api {
                 timestamp: self.timestamp,
             }
         }
+        /// Sets the key filter to a range of keys.
         pub fn keys<I, V>(self, range: I) -> Self
         where
             I: RangeBounds<V>,
@@ -192,6 +196,23 @@ pub mod api {
                 timestamp: self.timestamp,
             }
         }
+        /// Sets the key filter to all keys with the given prefix.
+        pub fn key_prefix(self, prefix: impl Into<Bytes>) -> Self {
+            let prefix = prefix.into();
+            let mut end = prefix.to_vec();
+            let start = Bound::Included(prefix);
+            let end = if next_prefix(&mut end) {
+                Bound::Excluded(end.into())
+            } else {
+                Bound::Unbounded
+            };
+            Self {
+                scope: self.scope,
+                key: (start, end),
+                timestamp: self.timestamp,
+            }
+        }
+        /// Sets the timestamp filter to a range of system times.
         pub fn timestamps(self, range: impl RangeBounds<SystemTime>) -> Self {
             let start = range.start_bound().map(to_nanos);
             let end = range.end_bound().map(to_nanos);
@@ -201,6 +222,7 @@ pub mod api {
                 timestamp: (start, end),
             }
         }
+        /// Checks if the given entry matches the filter.
         pub fn contains(&self, scope: &PublicKey, key: &[u8], timestamp: u64) -> bool {
             if let Some(scopes) = &self.scope {
                 if !scopes.contains(scope) {
@@ -333,6 +355,14 @@ pub mod api {
 
         pub fn subscribe_with_opts(&self, subscribe: Subscribe) -> SubscribeResult {
             SubscribeResult(Box::pin(self.0.server_streaming(subscribe, 32)))
+        }
+
+        pub fn iter_with_opts(&self, filter: Filter) -> IterResult {
+            let subscribe = Subscribe {
+                mode: SubscribeMode::Current,
+                filter,
+            };
+            IterResult(Box::pin(self.0.server_streaming(subscribe, 32)))
         }
 
         pub fn iter(&self) -> IterResult {
@@ -749,5 +779,250 @@ mod util {
                 self.0.extend_from_slice(&[b]);
             }
         }
+    }
+
+    pub fn next_prefix(bytes: &mut [u8]) -> bool {
+        for byte in bytes.iter_mut().rev() {
+            if *byte < 255 {
+                *byte += 1;
+                return true;
+            }
+            *byte = 0;
+        }
+        false
+    }
+}
+
+#[cfg(feature = "filter-parser")]
+mod peg_parser {
+    use std::{collections::HashSet, ops::Bound, str::FromStr, time::SystemTime, fmt::{self, Display}};
+
+    use bytes::Bytes;
+    use iroh::PublicKey;
+    use crate::{api::Filter, util::from_nanos};
+
+    impl Display for Filter {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let mut parts = Vec::new();
+
+            // Handle scope
+            if let Some(scopes) = &self.scope {
+                if !scopes.is_empty() {
+                    let scope_list: Vec<String> = scopes.iter().map(|k| k.to_string()).collect();
+                    parts.push(format!("scope={{{}}}", scope_list.join(",")));
+                }
+            }
+
+            // Handle key range
+            match &self.key {
+                (Bound::Unbounded, Bound::Unbounded) => {} // No key filter
+                (Bound::Included(start), Bound::Included(end)) if start == end => {
+                    // Single key
+                    parts.push(format!("key={}", format_bytes(start)));
+                }
+                (start_bound, end_bound) => {
+                    // Range
+                    let start_str = match start_bound {
+                        Bound::Unbounded => String::new(),
+                        Bound::Included(bytes) | Bound::Excluded(bytes) => format_bytes(bytes),
+                    };
+
+                    let end_str = match end_bound {
+                        Bound::Unbounded => String::new(),
+                        Bound::Included(bytes) | Bound::Excluded(bytes) => format_bytes(bytes),
+                    };
+
+                    let op = match end_bound {
+                        Bound::Included(_) => "..=",
+                        _ => "..",
+                    };
+
+                    parts.push(format!("key={}{}{}", start_str, op, end_str));
+                }
+            }
+
+            // Handle timestamp range
+            match &self.timestamp {
+                (Bound::Unbounded, Bound::Unbounded) => {} // No time filter
+                (start_bound, end_bound) => {
+                    let start_str = match start_bound {
+                        Bound::Unbounded => String::new(),
+                        Bound::Included(time) | Bound::Excluded(time) => {
+                            use chrono::{DateTime, Utc};
+                            let dt: DateTime<Utc> = (from_nanos(*time)).into();
+                            dt.to_rfc3339()
+                        }
+                    };
+
+                    let end_str = match end_bound {
+                        Bound::Unbounded => String::new(),
+                        Bound::Included(time) | Bound::Excluded(time) => {
+                            use chrono::{DateTime, Utc};
+                            let dt: DateTime<Utc> = (from_nanos(*time)).into();
+                            dt.to_rfc3339()
+                        }
+                    };
+
+                    let op = match end_bound {
+                        Bound::Included(_) => "..=",
+                        _ => "..",
+                    };
+
+                    parts.push(format!("time={}{}{}", start_str, op, end_str));
+                }
+            }
+
+            write!(f, "{}", parts.join(" | "))
+        }
+    }
+
+    fn format_bytes(bytes: &[u8]) -> String {
+        if bytes.is_empty() {
+            return "\"\"".to_string();
+        }
+
+        // Always quote strings, but use hex for non-UTF8 data
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            format!("\"{}\"", escape_string(s))
+        } else {
+            // Binary data, encode as hex (no quotes for hex)
+            hex::encode(bytes)
+        }
+    }
+
+    fn escape_string(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                '"' => "\\\"".to_string(),
+                '\\' => "\\\\".to_string(),
+                '\n' => "\\n".to_string(),
+                '\t' => "\\t".to_string(),
+                '\r' => "\\r".to_string(),
+                c => c.to_string(),
+            })
+            .collect()
+    }
+
+    impl FromStr for Filter {
+        type Err = String;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            parse_filter(s)
+        }
+    }
+
+    peg::parser! {
+        grammar filter_parser() for str {
+            pub rule filter() -> Filter
+                = _ parts:(filter_part() ** (_ "|" _)) _ {
+                    let mut filter = Filter::ALL;
+                    for part in parts {
+                        match part {
+                            FilterPart::Scope(keys) => filter = filter.scopes(keys),
+                            FilterPart::Key(range) => filter = filter.keys(range),
+                            FilterPart::KeyPrefix(prefix) => filter = filter.key_prefix(prefix),
+                            FilterPart::Time(range) => filter = filter.timestamps(range),
+                        }
+                    }
+                    filter
+                }
+
+            rule filter_part() -> FilterPart
+                = scope_part() / key_part() / time_part()
+
+            rule scope_part() -> FilterPart
+                = "scope" _ "=" _ "{" _ keys:(hex_value() ** (_ "," _)) _ "}" {
+                    let keys = keys.into_iter()
+                        .filter_map(|s| PublicKey::from_str(&s).ok())
+                        .collect();
+                    FilterPart::Scope(keys)
+                }
+
+            rule key_part() -> FilterPart
+                = "key" _ "=" _ result:(key_prefix() / key_range() / key_single()) { result }
+
+            rule key_prefix() -> FilterPart
+                = v:value() _ "*" { FilterPart::KeyPrefix(v) }
+
+            rule key_range() -> FilterPart
+                = start:value()? _ op:range_op() _ end:value()? {
+                    let start_bound = start.map_or(Bound::Unbounded, Bound::Included);
+                    let end_bound = end.map_or(Bound::Unbounded, |v| {
+                        if op { Bound::Included(v) } else { Bound::Excluded(v) }
+                    });
+                    FilterPart::Key((start_bound, end_bound))
+                }
+
+            rule key_single() -> FilterPart
+                = v:value() { FilterPart::Key((Bound::Included(v.clone()), Bound::Included(v))) }
+
+            rule time_part() -> FilterPart
+                = "time" _ "=" _ range:time_range() { FilterPart::Time(range) }
+
+            rule time_range() -> (Bound<SystemTime>, Bound<SystemTime>)
+                = start:timestamp()? _ op:range_op() _ end:timestamp()? {
+                    let start_bound = start.flatten().map_or(Bound::Unbounded, Bound::Included);
+                    let end_bound = end.flatten().map_or(Bound::Unbounded, |v| {
+                        if op { Bound::Included(v) } else { Bound::Excluded(v) }
+                    });
+                    (start_bound, end_bound)
+                }
+
+            rule range_op() -> bool
+                = "..=" { true } / ".." { false }
+
+            rule value() -> Bytes
+                = quoted_string() / hex_bytes()
+
+            rule quoted_string() -> Bytes
+                = "\"" s:string_content() "\"" { Bytes::from(s) }
+
+            rule string_content() -> String
+                = chars:string_char()* { chars.into_iter().collect() }
+
+            rule string_char() -> char
+                = "\\\\" { '\\' }
+                / "\\\"" { '"' }
+                / "\\n" { '\n' }
+                / "\\t" { '\t' }
+                / "\\r" { '\r' }
+                / c:$(!['\"' | '\\'] [_]) { c.chars().next().unwrap() }
+
+            rule hex_bytes() -> Bytes
+                = s:$(['0'..='9' | 'a'..='f' | 'A'..='F']+) {?
+                    hex::decode(s)
+                        .map(Bytes::from)
+                        .map_err(|_| "invalid hex")
+                }
+
+            rule hex_value() -> String
+                = s:$(['0'..='9' | 'a'..='f' | 'A'..='F']+) { s.to_string() }
+
+            rule timestamp() -> Option<SystemTime>
+                = s:$(
+                    ['0'..='9']+ "-" ['0'..='9']+ "-" ['0'..='9']+
+                    "T"
+                    ['0'..='9' | ':' | '.' | 'Z' | '+' | '-']+
+                ) {
+                    use chrono::{DateTime, Utc};
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&Utc).into())
+                        .ok()
+                }
+
+            rule _() = [' ' | '\t' | '\n' | '\r']*
+        }
+    }
+
+    #[derive(Debug)]
+    enum FilterPart {
+        Scope(HashSet<PublicKey>),
+        Key((Bound<Bytes>, Bound<Bytes>)),
+        KeyPrefix(Bytes),
+        Time((Bound<SystemTime>, Bound<SystemTime>)),
+    }
+
+    pub fn parse_filter(input: &str) -> Result<Filter, String> {
+        filter_parser::filter(input).map_err(|e| e.to_string())
     }
 }

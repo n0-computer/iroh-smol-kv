@@ -1,10 +1,14 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use clap::Parser;
 use iroh::{SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
-use iroh_docs_mini::{Config, api};
+use iroh_docs_mini::{
+    Config,
+    api::{self, Filter, Subscribe, SubscribeResult},
+};
 use iroh_gossip::{net::Gossip, proto::TopicId};
+use n0_future::{StreamExt, task::AbortOnDropHandle};
 use n0_snafu::ResultExt;
 use tokio::{
     io::{self, AsyncBufReadExt, BufReader},
@@ -23,9 +27,13 @@ enum Command {
     /// /get key
     Get { key: String },
     /// /peers node_ticket*
-    JoinPeers { peers: Vec<NodeTicket> },
-    /// /iter prefix?
-    Iter,
+    Join { peers: Vec<NodeTicket> },
+    /// /iter
+    Iter { filter: Filter },
+    /// /subscribe
+    Subscribe { filter: Filter },
+    /// /subscribe
+    Unsubscribe { id: usize },
     /// /quit
     Quit,
     /// Nothing of the above
@@ -34,12 +42,13 @@ enum Command {
 
 impl Command {
     fn parse(line: &str) -> Self {
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
-        let other = || Command::Other {
+        Self::parse_impl(line).unwrap_or(Command::Other {
             raw: line.to_string(),
-        };
-
-        match parts.as_slice() {
+        })
+    }
+    fn parse_impl(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        Some(match parts.as_slice() {
             ["/put", key, value] => Command::Put {
                 key: key.to_string(),
                 value: value.to_string(),
@@ -47,21 +56,26 @@ impl Command {
             ["/get", key] => Command::Get {
                 key: key.to_string(),
             },
-            ["/join_peers", peers @ ..] => {
-                if let Ok(peers) = peers
+            ["/join", peers @ ..] => {
+                let peers = peers
                     .iter()
                     .map(|s| NodeTicket::from_str(s))
                     .collect::<Result<Vec<_>, _>>()
-                {
-                    Command::JoinPeers { peers }
-                } else {
-                    other()
-                }
+                    .ok()?;
+                Command::Join { peers }
             }
-            ["/iter"] => Command::Iter,
+            ["/iter", filter @ ..] => Command::Iter {
+                filter: Filter::from_str(&filter.join(" ")).ok()?,
+            },
+            ["/subscribe", filter @ ..] => Command::Subscribe {
+                filter: Filter::from_str(&filter.join(" ")).ok()?,
+            },
+            ["/unsubscribe", id] => Command::Unsubscribe {
+                id: id.parse().ok()?,
+            },
             ["/quit"] => Command::Quit,
-            _ => other(),
-        }
+            _ => return None,
+        })
     }
 }
 
@@ -71,6 +85,29 @@ fn utf8_or_hex(bytes: &[u8]) -> String {
     } else {
         hex::encode(bytes)
     }
+}
+
+async fn handle_subscription(id: usize, sub: SubscribeResult) {
+    let stream = sub.stream();
+    tokio::pin!(stream);
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok((scope, key, value)) => {
+                println!(
+                    "#{}: ({},{},{})",
+                    id,
+                    scope.fmt_short(),
+                    utf8_or_hex(&key),
+                    utf8_or_hex(&value.value)
+                );
+            }
+            Err(e) => {
+                println!("#{}: Error in subscription: {:?}", id, e);
+                break;
+            }
+        }
+    }
+    println!("#{} ended", id);
 }
 
 #[tokio::main]
@@ -117,6 +154,13 @@ async fn main() -> n0_snafu::Result<()> {
     let mut lines = reader.lines();
 
     println!("Reading from stdin... Press Ctrl+C to exit.");
+    let mut op_id = 0;
+    let mut subscribers = BTreeMap::new();
+    let mut next_op_id = || {
+        let id = op_id;
+        op_id += 1;
+        id
+    };
 
     loop {
         tokio::select! {
@@ -138,17 +182,37 @@ async fn main() -> n0_snafu::Result<()> {
                         let res = api.get(node_id, key.clone()).await.e()?;
                         println!("Get key: {}, value: {:?}", key, res);
                     }
-                    Command::JoinPeers { peers } => {
+                    Command::Join { peers } => {
                         let ids = peers.iter().map(|p| p.node_addr().node_id).collect::<Vec<_>>();
                         for addr in peers {
                             router.endpoint().add_node_addr(addr.node_addr().clone()).ok();
                         }
                         api.join_peers(ids).await.e()?;
                     }
-                    Command::Iter => {
-                        let items = api.iter().collect::<Vec<_>>().await.e()?;
+                    Command::Iter { filter } => {
+                        let id = next_op_id();
+                        println!("#{id} Iter {filter}");
+                        let items = api.iter_with_opts(filter).collect::<Vec<_>>().await.e()?;
                         for (s, k, v) in items {
-                            println!("{} {}=>{}", s.fmt_short(), utf8_or_hex(&k), utf8_or_hex(&v));
+                            println!("#{id} ({},{},{})", s.fmt_short(), utf8_or_hex(&k), utf8_or_hex(&v));
+                        }
+                    }
+                    Command::Subscribe { filter } => {
+                        let id = next_op_id();
+                        println!("#{id} Subscribe {filter}");
+                        let sub = api.subscribe_with_opts(Subscribe {
+                            filter,
+                            mode: api::SubscribeMode::Both,
+                        });
+                        let task = tokio::spawn(handle_subscription(id, sub));
+                        subscribers.insert(id, AbortOnDropHandle::new(task));
+                    }
+                    Command::Unsubscribe { id } => {
+                        if let Some(handle) = subscribers.remove(&id) {
+                            drop(handle); // Dropping the handle will abort the task
+                            println!("#{} unsubscribed", id);
+                        } else {
+                            println!("#{} does not exist", id);
                         }
                     }
                     Command::Quit => {

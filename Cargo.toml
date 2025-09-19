@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bytes = { version = "1.10.1", features = ["serde"] }
 ed25519-dalek = { version = "2.2.0", features = ["signature"] }
+hex = "0.4.3"
 iroh = "0.91.2"
 iroh-gossip = "0.91.0"
 irpc = "0.7.0"
@@ -19,9 +20,15 @@ snafu = "0.8.9"
 tokio = "1.47.1"
 tracing = "0.1.41"
 
+chrono = { version = "0.4.42", optional = true }
+peg = { version = "0.8.5", optional = true }
+
+[features]
+filter-parser = ["dep:chrono", "dep:peg"]
+default = ["filter-parser"]
+
 [dev-dependencies]
 clap = { version = "4.5.47", features = ["derive"] }
 iroh-base = "0.91.2"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 n0-snafu = "0.2.1"
-hex = "0.4.3"

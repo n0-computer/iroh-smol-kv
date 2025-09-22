@@ -6,7 +6,9 @@ use iroh::{PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
-    api::{self, Filter, Subscribe, SubscribeResponse, SubscribeResult}, util::format_bytes, Config
+    Config,
+    api::{self, Filter, Subscribe, SubscribeResponse, SubscribeResult},
+    util::format_bytes,
 };
 use n0_future::{StreamExt, task::AbortOnDropHandle};
 use n0_snafu::ResultExt;

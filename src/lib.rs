@@ -145,9 +145,7 @@ pub mod api {
                 BroadcastItem::Entry((scope, key, value)) => {
                     filter.contains(scope, key, value.timestamp)
                 }
-                BroadcastItem::Expired((scope, key, _)) => {
-                    filter.contains_key(scope, key)
-                }
+                BroadcastItem::Expired((scope, key, _)) => filter.contains_key(scope, key),
             }
         }
     }
@@ -293,14 +291,13 @@ pub mod api {
     pub struct SubscribeResult(BoxFuture<Result<mpsc::Receiver<SubscribeResponse>, irpc::Error>>);
 
     impl SubscribeResult {
-
         /// Stream of entries from the subscription, as raw SubscribeResponse values.
-        pub fn stream_raw(self) -> impl n0_future::Stream<Item = Result<SubscribeResponse, irpc::Error>> {
+        pub fn stream_raw(
+            self,
+        ) -> impl n0_future::Stream<Item = Result<SubscribeResponse, irpc::Error>> {
             async move {
                 let rx = self.0.await?;
-                Ok(rx
-                    .into_stream()
-                    .map_err(|e| irpc::Error::from(e)))
+                Ok(rx.into_stream().map_err(|e| irpc::Error::from(e)))
             }
             .try_flatten_stream()
         }
@@ -586,9 +583,7 @@ pub mod api {
             }
             let mut expired_scopes = HashSet::new();
             for (scope, key, _) in &expired {
-                let entry = self.state
-                    .current
-                    .get_mut(scope).expect("just checked");
+                let entry = self.state.current.get_mut(scope).expect("just checked");
                 entry.remove_mut(key);
                 if entry.is_empty() {
                     expired_scopes.insert(scope.clone());

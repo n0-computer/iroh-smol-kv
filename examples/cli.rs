@@ -6,9 +6,7 @@ use iroh::{PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
-    Config,
-    api::{self, Filter, Subscribe, SubscribeResult},
-    util::format_bytes,
+    api::{self, Filter, Subscribe, SubscribeResponse, SubscribeResult}, util::format_bytes, Config
 };
 use n0_future::{StreamExt, task::AbortOnDropHandle};
 use n0_snafu::ResultExt;
@@ -48,11 +46,11 @@ enum Command {
 }
 
 async fn handle_subscription(id: usize, sub: SubscribeResult) {
-    let stream = sub.stream();
+    let stream = sub.stream_raw();
     tokio::pin!(stream);
     while let Some(item) = stream.next().await {
         match item {
-            Ok((scope, key, value)) => {
+            Ok(SubscribeResponse::Entry((scope, key, value))) => {
                 println!(
                     "#{}: ({},{},{})",
                     id,
@@ -61,6 +59,16 @@ async fn handle_subscription(id: usize, sub: SubscribeResult) {
                     format_bytes(&value.value)
                 );
             }
+            Ok(SubscribeResponse::Expired((scope, key, timestamp))) => {
+                println!(
+                    "#{}: expired ({},{},{})",
+                    id,
+                    scope.fmt_short(),
+                    format_bytes(&key),
+                    timestamp,
+                );
+            }
+            Ok(SubscribeResponse::CurrentDone) => {}
             Err(e) => {
                 println!("#{}: Error in subscription: {:?}", id, e);
                 break;

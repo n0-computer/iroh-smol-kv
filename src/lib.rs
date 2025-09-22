@@ -66,6 +66,7 @@ pub mod api {
     use rand::seq::SliceRandom;
     use serde::{Deserialize, Serialize};
     use snafu::Snafu;
+    use tokio::sync::broadcast;
     use tracing::{error, trace};
 
     use crate::{
@@ -109,10 +110,46 @@ pub mod api {
         Both,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, Clone)]
     pub enum SubscribeResponse {
+        /// A matching entry (scope, key, value)
         Entry(Entry),
+        /// Marker that all current entries have been sent, and future entries will follow.
+        ///
+        /// You will get at most one CurrentDone message per subscription.
         CurrentDone,
+        /// An entry that has expired (removed). The u64 is the timestamp when it was last modified.
+        Expired((PublicKey, Bytes, u64)),
+    }
+
+    #[derive(Clone)]
+    pub enum BroadcastItem {
+        /// A matching entry (scope, key, value)
+        Entry(Entry),
+        /// An entry that has expired (removed)
+        Expired((PublicKey, Bytes, u64)),
+    }
+
+    impl From<BroadcastItem> for SubscribeResponse {
+        fn from(item: BroadcastItem) -> Self {
+            match item {
+                BroadcastItem::Entry(entry) => SubscribeResponse::Entry(entry),
+                BroadcastItem::Expired(entry) => SubscribeResponse::Expired(entry),
+            }
+        }
+    }
+
+    impl BroadcastItem {
+        fn contained_in(&self, filter: &crate::api::Filter) -> bool {
+            match self {
+                BroadcastItem::Entry((scope, key, value)) => {
+                    filter.contains(scope, key, value.timestamp)
+                }
+                BroadcastItem::Expired((scope, key, _)) => {
+                    filter.contains_key(scope, key)
+                }
+            }
+        }
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -224,12 +261,17 @@ pub mod api {
         }
         /// Checks if the given entry matches the filter.
         pub fn contains(&self, scope: &PublicKey, key: &[u8], timestamp: u64) -> bool {
+            self.contains_key(scope, key) && self.timestamp.contains(&timestamp)
+        }
+
+        /// Checks if the given scope and key match the filter, excluding timestamp.
+        pub fn contains_key(&self, scope: &PublicKey, key: &[u8]) -> bool {
             if let Some(scopes) = &self.scope {
                 if !scopes.contains(scope) {
                     return false;
                 }
             }
-            self.key.contains(key) && self.timestamp.contains(&timestamp)
+            self.key.contains(key)
         }
     }
 
@@ -251,6 +293,18 @@ pub mod api {
     pub struct SubscribeResult(BoxFuture<Result<mpsc::Receiver<SubscribeResponse>, irpc::Error>>);
 
     impl SubscribeResult {
+
+        /// Stream of entries from the subscription, as raw SubscribeResponse values.
+        pub fn stream_raw(self) -> impl n0_future::Stream<Item = Result<SubscribeResponse, irpc::Error>> {
+            async move {
+                let rx = self.0.await?;
+                Ok(rx
+                    .into_stream()
+                    .map_err(|e| irpc::Error::from(e)))
+            }
+            .try_flatten_stream()
+        }
+
         /// Stream of entries from the subscription, without distinguishing current vs future.
         pub fn stream(self) -> impl n0_future::Stream<Item = Result<Entry, irpc::Error>> {
             async move {
@@ -260,6 +314,7 @@ pub mod api {
                     .try_filter_map(|res| async move {
                         match res {
                             SubscribeResponse::Entry(entry) => Ok(Some(entry)),
+                            SubscribeResponse::Expired((_, _, _)) => Ok(None),
                             SubscribeResponse::CurrentDone => Ok(None),
                         }
                     })
@@ -484,12 +539,12 @@ pub mod api {
     }
 
     struct Actor {
-        state: State,
         sender: GossipSender,
         receiver: GossipReceiver,
-        broadcast_tx: tokio::sync::broadcast::Sender<Entry>,
         rx: tokio::sync::mpsc::Receiver<Message>,
         config: Config,
+        state: State,
+        broadcast_tx: broadcast::Sender<BroadcastItem>,
     }
 
     impl Actor {
@@ -508,6 +563,41 @@ pub mod api {
                 broadcast_tx,
                 config,
             }
+        }
+
+        fn horizon(&self) -> Option<u64> {
+            self.config
+                .expiry
+                .as_ref()
+                .map(|d| current_timestamp() - d.horizon.as_nanos() as u64)
+        }
+
+        fn apply_horizon(&mut self) -> Vec<(PublicKey, Bytes, u64)> {
+            let mut expired = Vec::new();
+            let Some(horizon) = self.horizon() else {
+                return expired;
+            };
+            for (scope, map) in self.state.current.iter() {
+                for (key, value) in map.iter() {
+                    if value.timestamp < horizon {
+                        expired.push((scope.clone(), key.clone(), value.timestamp));
+                    }
+                }
+            }
+            let mut expired_scopes = HashSet::new();
+            for (scope, key, _) in &expired {
+                let entry = self.state
+                    .current
+                    .get_mut(scope).expect("just checked");
+                entry.remove_mut(key);
+                if entry.is_empty() {
+                    expired_scopes.insert(scope.clone());
+                }
+            }
+            for scope in expired_scopes {
+                self.state.current.remove_mut(&scope);
+            }
+            expired
         }
 
         /// Publish all known values in random order over the gossip network, spaced out evenly over the given total duration.
@@ -566,7 +656,7 @@ pub mod api {
             tx: mpsc::Sender<SubscribeResponse>,
             filter: Filter,
             current: Option<State>,
-            future: Option<tokio::sync::broadcast::Receiver<Entry>>,
+            future: Option<tokio::sync::broadcast::Receiver<BroadcastItem>>,
         ) {
             if let Some(snapshot) = current {
                 if Self::iter_current(&tx, &snapshot, &filter).await.is_err() {
@@ -586,11 +676,10 @@ pub mod api {
                         let Ok(item) = item else {
                             break;
                         };
-                        let (scope, key, value) = &item;
-                        if !filter.contains(scope, key, value.timestamp) {
+                        if !item.contained_in(&filter) {
                             continue;
                         }
-                        if tx.send(SubscribeResponse::Entry(item)).await.is_err() {
+                        if tx.send(item.into()).await.is_err() {
                             break;
                         }
                     }
@@ -609,7 +698,12 @@ pub mod api {
                 self.sender.clone(),
                 self.config.anti_entropy_interval,
             );
-            tokio::pin!(anti_entropy);
+            let horizon_period = match self.horizon() {
+                Some(_) => Duration::from_secs(30),
+                None => Duration::MAX,
+            };
+            let apply_horizon = Box::pin(tokio::time::sleep(horizon_period));
+            tokio::pin!(anti_entropy, apply_horizon);
             loop {
                 tokio::select! {
                     msg = self.rx.recv() => {
@@ -624,7 +718,7 @@ pub mod api {
                                 let gossip_msg = GossipMessage::SignedValue(msg.scope.clone(), msg.key.clone(), msg.value.clone());
                                 let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
                                 self.sender.broadcast(gossip_msg).await.ok();
-                                self.broadcast_tx.send((msg.scope, msg.key.clone(), msg.value.clone())).ok();
+                                self.broadcast_tx.send(BroadcastItem::Entry((msg.scope, msg.key.clone(), msg.value.clone()))).ok();
                                 msg.tx.send(()).await.ok();
                             }
                             Message::Get(msg) => {
@@ -689,13 +783,19 @@ pub mod api {
                         };
                         match msg {
                             GossipMessage::SignedValue(scope, key, value) => {
+                                if let Some(horizon) = self.horizon() {
+                                    if value.timestamp < horizon {
+                                        trace!("Ignoring value key={:?} epoch={} below horizon", key, value.timestamp);
+                                        continue;
+                                    }
+                                }
                                 let id = scope.fmt_short();
                                 trace!(%id, "Received signed value key={:?} epoch={}", key, value.timestamp);
                                 let Ok(_) = self.state.insert_signed_value(scope, key.clone(), value.clone()) else {
                                     continue;
                                 };
                                 trace!(%id, "Broadcasting internally");
-                                self.broadcast_tx.send((scope, key, value)).ok();
+                                self.broadcast_tx.send(BroadcastItem::Entry((scope, key, value))).ok();
                             }
                         }
                     }
@@ -707,6 +807,14 @@ pub mod api {
                         // anti-entropy finished, start a new one
                         anti_entropy.set(Self::anti_entropy(self.state.snapshot(), self.sender.clone(), self.config.anti_entropy_interval));
                     }
+                    _ = &mut apply_horizon => {
+                        let expired = self.apply_horizon();
+                        for entry in expired {
+                            self.broadcast_tx.send(BroadcastItem::Expired(entry)).ok();
+                        }
+                        // schedule next horizon application
+                        apply_horizon.set(Box::pin(tokio::time::sleep(horizon_period)));
+                    }
                     _ = tasks.next(), if !tasks.is_empty() => {}
                 }
             }
@@ -717,12 +825,26 @@ pub mod api {
 pub struct Config {
     pub anti_entropy_interval: Duration,
     pub fast_anti_entropy_interval: Duration,
+    /// Optional horizon duration. Values older than now - horizon are removed,
+    /// and will not be re-added.
+    pub expiry: Option<ExpiryConfig>,
+}
+
+pub struct ExpiryConfig {
+    /// Duration after which values expire.
+    pub horizon: Duration,
+    /// How often to check for expired values.
+    pub check_interval: Duration,
 }
 
 impl Config {
     pub const DEBUG: Self = Self {
         anti_entropy_interval: Duration::from_secs(30),
         fast_anti_entropy_interval: Duration::from_secs(5),
+        expiry: Some(ExpiryConfig {
+            horizon: Duration::from_secs(30),
+            check_interval: Duration::from_secs(10),
+        }),
     };
 }
 
@@ -733,6 +855,11 @@ impl Default for Config {
             anti_entropy_interval: Duration::from_secs(300),
             // republish all known values every 10 seconds when we get a new peer
             fast_anti_entropy_interval: Duration::from_secs(10),
+            // keep values for 24 hours, purge every hour
+            expiry: Some(ExpiryConfig {
+                horizon: Duration::from_secs(3600 * 24),
+                check_interval: Duration::from_secs(3600),
+            }),
         }
     }
 }

@@ -30,12 +30,9 @@ tracing = "0.1.41"
 
 chrono = { version = "0.4.42", optional = true }
 peg = { version = "0.8.5", optional = true }
-uniffi = { version = "0.28.3", optional = true }
-sync_wrapper = { version = "1.0.2", optional = true }
 
 [features]
 filter-parser = ["dep:chrono", "dep:peg"]
-uniffi = ["dep:uniffi", "dep:sync_wrapper"]
 default = ["filter-parser"]
 
 [dev-dependencies]
@@ -45,4 +42,4 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 n0-snafu = "0.2.1"
 
 [workspace]
-members = ["uniffi-example"]
+members = ["uniffi-example", "iroh-smol-kv-uniffi"]

@@ -5,9 +5,6 @@ use iroh::PublicKey;
 
 type Entry = (PublicKey, Bytes, SignedValue);
 
-#[cfg(feature = "uniffi")]
-uniffi::setup_scaffolding!();
-
 pub mod proto {
     //! Gossip protocol messages and helpers
     use std::time::SystemTime;
@@ -104,7 +101,6 @@ pub mod api {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     pub enum SubscribeMode {
         /// Only send current values that match the filter
         Current,
@@ -269,9 +265,10 @@ pub mod api {
         /// Checks if the given scope and key match the filter, excluding timestamp.
         pub fn contains_key(&self, scope: &PublicKey, key: &[u8]) -> bool {
             if let Some(scopes) = &self.scope
-                && !scopes.contains(scope) {
-                    return false;
-                }
+                && !scopes.contains(scope)
+            {
+                return false;
+            }
             self.key.contains(key)
         }
     }
@@ -661,9 +658,10 @@ pub mod api {
             future: Option<tokio::sync::broadcast::Receiver<BroadcastItem>>,
         ) {
             if let Some(snapshot) = current
-                && Self::iter_current(&tx, &snapshot, &filter).await.is_err() {
-                    return;
-                }
+                && Self::iter_current(&tx, &snapshot, &filter).await.is_err()
+            {
+                return;
+            }
             let Some(mut broadcast_rx) = future else {
                 return;
             };
@@ -823,7 +821,6 @@ pub mod api {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct Config {
     pub anti_entropy_interval: Duration,
     pub fast_anti_entropy_interval: Duration,
@@ -833,7 +830,6 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ExpiryConfig {
     /// Duration after which values expire.
     pub horizon: Duration,
@@ -881,7 +877,7 @@ pub mod util {
     ///
     /// It will also not work for dates before the unix epoch, but that's not a
     /// problem for our use case.
-    pub(crate) fn to_nanos(t: &SystemTime) -> u64 {
+    pub fn to_nanos(t: &SystemTime) -> u64 {
         t.duration_since(SystemTime::UNIX_EPOCH)
             .expect("system time before unix epoch")
             .as_nanos()
@@ -889,11 +885,11 @@ pub mod util {
             .expect("u64 nanos")
     }
 
-    pub(crate) fn current_timestamp() -> u64 {
+    pub fn current_timestamp() -> u64 {
         to_nanos(&SystemTime::now())
     }
 
-    pub(crate) fn from_nanos(nanos: u64) -> SystemTime {
+    pub fn from_nanos(nanos: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
     }
 
@@ -913,7 +909,7 @@ pub mod util {
         }
     }
 
-    pub(crate) fn next_prefix(bytes: &mut [u8]) -> bool {
+    pub fn next_prefix(bytes: &mut [u8]) -> bool {
         for byte in bytes.iter_mut().rev() {
             if *byte < 255 {
                 *byte += 1;
@@ -977,10 +973,11 @@ mod peg_parser {
 
             // Handle scope
             if let Some(scopes) = &self.scope
-                && !scopes.is_empty() {
-                    let scope_list: Vec<String> = scopes.iter().map(|k| k.to_string()).collect();
-                    parts.push(format!("scope={{{}}}", scope_list.join(",")));
-                }
+                && !scopes.is_empty()
+            {
+                let scope_list: Vec<String> = scopes.iter().map(|k| k.to_string()).collect();
+                parts.push(format!("scope={{{}}}", scope_list.join(",")));
+            }
 
             // Handle key range
             match &self.key {
@@ -1164,417 +1161,5 @@ mod peg_parser {
 
     pub fn parse_filter(input: &str) -> Result<Filter, String> {
         filter_parser::filter(input).map_err(|e| e.to_string())
-    }
-}
-
-#[cfg(feature = "uniffi")]
-pub mod uniffi_support {
-    use std::{collections::HashSet, ops::Bound, pin::Pin, sync::Arc};
-
-    use bytes::Bytes;
-    use iroh::{PublicKey, SecretKey};
-    use iroh_gossip::api::GossipTopic;
-    use n0_future::{Stream, StreamExt};
-    use snafu::Snafu;
-    use sync_wrapper::SyncStream;
-    use tokio::sync::Mutex;
-
-    use crate::api::Subscribe;
-    pub use crate::{Config, api::SubscribeMode};
-
-    #[derive(uniffi::Enum, Debug, Clone)]
-    pub enum KeyBound {
-        Unbounded,
-        Included(Vec<u8>),
-        Excluded(Vec<u8>),
-    }
-
-    impl From<Bound<Bytes>> for KeyBound {
-        fn from(b: Bound<Bytes>) -> Self {
-            match b {
-                Bound::Unbounded => KeyBound::Unbounded,
-                Bound::Included(b) => KeyBound::Included(b.into()),
-                Bound::Excluded(b) => KeyBound::Excluded(b.into()),
-            }
-        }
-    }
-
-    impl From<KeyBound> for Bound<Bytes> {
-        fn from(b: KeyBound) -> Self {
-            match b {
-                KeyBound::Unbounded => Bound::Unbounded,
-                KeyBound::Included(b) => Bound::Included(b.into()),
-                KeyBound::Excluded(b) => Bound::Excluded(b.into()),
-            }
-        }
-    }
-
-    #[derive(uniffi::Enum, Debug, Clone, Copy)]
-    pub enum TimeBound {
-        Unbounded,
-        Included(u64),
-        Excluded(u64),
-    }
-
-    impl From<Bound<u64>> for TimeBound {
-        fn from(b: Bound<u64>) -> Self {
-            match b {
-                Bound::Unbounded => TimeBound::Unbounded,
-                Bound::Included(t) => TimeBound::Included(t),
-                Bound::Excluded(t) => TimeBound::Excluded(t),
-            }
-        }
-    }
-
-    impl From<TimeBound> for Bound<u64> {
-        fn from(b: TimeBound) -> Self {
-            match b {
-                TimeBound::Unbounded => Bound::Unbounded,
-                TimeBound::Included(t) => Bound::Included(t),
-                TimeBound::Excluded(t) => Bound::Excluded(t),
-            }
-        }
-    }
-
-    #[derive(uniffi::Object, Debug, Clone)]
-    pub struct Filter {
-        min_key: KeyBound,
-        max_key: KeyBound,
-        min_time: TimeBound,
-        max_time: TimeBound,
-        scope: Vec<Vec<u8>>,
-    }
-
-    impl From<crate::api::Filter> for Filter {
-        fn from(f: crate::api::Filter) -> Self {
-            let min_key = f.key.0.into();
-            let max_key = f.key.1.into();
-            let min_time = f.timestamp.0.into();
-            let max_time = f.timestamp.1.into();
-            let scope = f
-                .scope
-                .map(|s| s.into_iter().map(|k| k.as_ref().to_vec()).collect())
-                .unwrap_or_default();
-            Self {
-                min_key,
-                max_key,
-                min_time,
-                max_time,
-                scope,
-            }
-        }
-    }
-
-    impl TryFrom<Filter> for crate::api::Filter {
-        type Error = PublicKeyError;
-
-        fn try_from(f: Filter) -> Result<Self, Self::Error> {
-            let min_key = f.min_key.into();
-            let max_key = f.max_key.into();
-            let min_time = f.min_time.into();
-            let max_time = f.max_time.into();
-            let scope = if f.scope.is_empty() {
-                None
-            } else {
-                let mut set = HashSet::with_capacity(f.scope.len());
-                for k in f.scope {
-                    let pk = parse_public_key(&k)?;
-                    set.insert(pk);
-                }
-                Some(set)
-            };
-            Ok(crate::api::Filter {
-                key: (min_key, max_key),
-                timestamp: (min_time, max_time),
-                scope,
-            })
-        }
-    }
-
-    #[derive(Debug, Snafu, uniffi::Error)]
-    #[snafu(module)]
-    pub enum PublicKeyError {
-        Length { size: u64 },
-        Invalid { message: String },
-    }
-
-    #[derive(Debug, Snafu, uniffi::Error)]
-    #[snafu(module)]
-    pub enum PrivateKeyError {
-        Length { size: u64 },
-    }
-
-    #[derive(Debug, Snafu, uniffi::Error)]
-    #[snafu(module)]
-    pub enum CreateClientError {
-        Invalid,
-    }
-
-    #[derive(Debug, Snafu, uniffi::Error)]
-    #[snafu(module)]
-    pub enum FilterParseError {
-        Invalid { message: String },
-    }
-
-    #[derive(Debug, Snafu, uniffi::Error)]
-    #[snafu(module)]
-    pub enum PutError {
-        PutFailed { message: String },
-    }
-
-    #[derive(Debug, Snafu, uniffi::Error)]
-    #[snafu(module)]
-    pub enum GetError {
-        #[snafu(transparent)]
-        InvalidKey {
-            source: PublicKeyError,
-        },
-        Irpc {
-            message: String,
-        },
-    }
-
-    fn parse_public_key(key: &[u8]) -> Result<PublicKey, PublicKeyError> {
-        if key.len() != 32 {
-            return Err(PublicKeyError::Length {
-                size: key.len() as u64,
-            });
-        }
-        PublicKey::from_bytes(&key.try_into().expect("len checked")).map_err(|e| {
-                PublicKeyError::Invalid {
-                    message: e.to_string(),
-                }
-            })
-    }
-
-    #[uniffi::export]
-    impl Filter {
-        #[cfg(feature = "filter-parser")]
-        #[uniffi::constructor]
-        pub fn parse(text: String) -> Result<Arc<Self>, FilterParseError> {
-            use std::str::FromStr;
-
-            crate::api::Filter::from_str(&text)
-                .map_err(|e| FilterParseError::Invalid {
-                    message: e.to_string(),
-                })
-                .map(Into::into)
-                .map(Arc::new)
-        }
-
-        #[uniffi::constructor]
-        pub fn all() -> Arc<Self> {
-            Arc::new(Self {
-                min_key: KeyBound::Unbounded,
-                max_key: KeyBound::Unbounded,
-                min_time: TimeBound::Unbounded,
-                max_time: TimeBound::Unbounded,
-                scope: Vec::new(),
-            })
-        }
-
-        #[uniffi::constructor]
-        pub fn empty() -> Arc<Self> {
-            Arc::new(Self {
-                min_key: KeyBound::Unbounded,
-                max_key: KeyBound::Excluded(vec![]),
-                min_time: TimeBound::Unbounded,
-                max_time: TimeBound::Excluded(0),
-                scope: Vec::new(),
-            })
-        }
-
-        pub fn scopes(mut self: Arc<Self>, scopes: Vec<Vec<u8>>) -> Arc<Self> {
-            let this = Arc::make_mut(&mut self);
-            this.scope = scopes;
-            self
-        }
-
-        pub fn scope(self: Arc<Self>, scope: Vec<u8>) -> Arc<Self> {
-            self.scopes(vec![scope])
-        }
-
-        pub fn keys(mut self: Arc<Self>, min: KeyBound, max: KeyBound) -> Arc<Self> {
-            let this = Arc::make_mut(&mut self);
-            this.min_key = min;
-            this.max_key = max;
-            self
-        }
-
-        pub fn key_range(self: Arc<Self>, min: Vec<u8>, max: Vec<u8>) -> Arc<Self> {
-            self.keys(KeyBound::Included(min), KeyBound::Excluded(max))
-        }
-
-        pub fn key_prefix(mut self: Arc<Self>, prefix: Vec<u8>) -> Arc<Self> {
-            let this = Arc::make_mut(&mut self);
-            let mut end = prefix.clone();
-            if crate::util::next_prefix(&mut end) {
-                this.min_key = KeyBound::Included(prefix);
-                this.max_key = KeyBound::Excluded(end);
-            } else {
-                this.min_key = KeyBound::Included(prefix);
-                this.max_key = KeyBound::Unbounded;
-            }
-            self
-        }
-
-        pub fn timestamps(mut self: Arc<Self>, min: TimeBound, max: TimeBound) -> Arc<Self> {
-            let this = Arc::make_mut(&mut self);
-            this.min_time = min;
-            this.max_time = max;
-            self
-        }
-
-        pub fn time_range(self: Arc<Self>, min: u64, max: u64) -> Arc<Self> {
-            self.timestamps(TimeBound::Included(min), TimeBound::Excluded(max))
-        }
-    }
-
-    #[derive(uniffi::Enum, Snafu, Debug)]
-    #[snafu(module)]
-    pub enum SubscribeNextError {
-        Irpc { message: String },
-    }
-
-    #[derive(uniffi::Enum, Debug)]
-    pub enum SubscribeItem {
-        Entry {
-            scope: Vec<u8>,
-            key: Vec<u8>,
-            timestamp: u64,
-            value: Vec<u8>,
-        },
-        CurrentDone,
-        Expired {
-            scope: Vec<u8>,
-            key: Vec<u8>,
-            timestamp: u64,
-        },
-    }
-
-    impl From<crate::api::SubscribeItem> for SubscribeItem {
-        fn from(item: crate::api::SubscribeItem) -> Self {
-            match item {
-                crate::api::SubscribeItem::Entry((scope, key, value)) => SubscribeItem::Entry {
-                    scope: scope.to_vec(),
-                    key: key.to_vec(),
-                    timestamp: value.timestamp,
-                    value: value.value.to_vec(),
-                },
-                crate::api::SubscribeItem::CurrentDone => SubscribeItem::CurrentDone,
-                crate::api::SubscribeItem::Expired((scope, key, timestamp)) => {
-                    SubscribeItem::Expired {
-                        scope: scope.to_vec(),
-                        key: key.to_vec(),
-                        timestamp,
-                    }
-                }
-            }
-        }
-    }
-
-    #[derive(uniffi::Object)]
-    #[allow(clippy::type_complexity)]
-    pub struct SubscribeResponse {
-        inner: Mutex<
-            Pin<
-                Box<
-                    dyn Stream<Item = Result<crate::api::SubscribeItem, irpc::Error>>
-                        + Send
-                        + Sync
-                        + 'static,
-                >,
-            >,
-        >,
-    }
-
-    #[uniffi::export]
-    impl SubscribeResponse {
-        pub async fn next_raw(
-            self: Arc<Self>,
-        ) -> Result<Option<SubscribeItem>, SubscribeNextError> {
-            let mut this = self.inner.lock().await;
-            match this.as_mut().next().await {
-                None => Ok(None),
-                Some(Ok(item)) => Ok(Some(item.into())),
-                Some(Err(e)) => Err(SubscribeNextError::Irpc {
-                    message: e.to_string(),
-                }),
-            }
-        }
-    }
-
-    #[derive(uniffi::Object, Debug, Clone)]
-    pub struct Client {
-        client: crate::api::Client,
-    }
-
-    impl Client {
-        /// This can not be called from uniffi, since we can't make GossipTopic support uniffi.
-        pub fn local(topic: GossipTopic, config: Config) -> Self {
-            let client = crate::api::Client::local(topic, config);
-            Self { client }
-        }
-    }
-
-    #[uniffi::export]
-    impl Client {
-        pub fn write_scope(
-            self: Arc<Self>,
-            secret: Vec<u8>,
-        ) -> Result<Arc<WriteScope>, PrivateKeyError> {
-            let secret = SecretKey::from_bytes(&secret.try_into().map_err(|e: Vec<u8>| {
-                PrivateKeyError::Length {
-                    size: e.len() as u64,
-                }
-            })?);
-            let write = self.client.write(secret);
-            Ok(Arc::new(WriteScope { write }))
-        }
-
-        pub async fn get(&self, scope: Vec<u8>, key: Vec<u8>) -> Result<Option<Vec<u8>>, GetError> {
-            let scope = parse_public_key(&scope)?;
-            let res = self
-                .client
-                .get(scope, key)
-                .await
-                .map_err(|e| GetError::Irpc {
-                    message: e.to_string(),
-                })?;
-            Ok(res.map(|v| v.to_vec()))
-        }
-
-        pub fn subscribe(
-            &self,
-            filter: Arc<Filter>,
-            mode: SubscribeMode,
-        ) -> Result<Arc<SubscribeResponse>, PublicKeyError> {
-            let filter: crate::api::Filter = (*filter).clone().try_into()?;
-            let stream = self
-                .client
-                .subscribe_with_opts(Subscribe { filter, mode })
-                .stream_raw();
-            let wrapper = SyncStream::new(stream);
-            Ok(Arc::new(SubscribeResponse {
-                inner: Mutex::new(Box::pin(wrapper)),
-            }))
-        }
-    }
-
-    #[derive(uniffi::Object, Debug, Clone)]
-    pub struct WriteScope {
-        write: crate::api::WriteScope,
-    }
-
-    #[uniffi::export]
-    impl WriteScope {
-        pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), PutError> {
-            self.write
-                .put(key, value)
-                .await
-                .map_err(|e| PutError::PutFailed {
-                    message: e.to_string(),
-                })
-        }
     }
 }

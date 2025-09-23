@@ -12,7 +12,7 @@ build-rust:
 
 generate: build-rust
 	uniffi-bindgen-go --library ../target/debug/libuniffi_example.dylib --out-dir go/
-	cp ../target/debug/libuniffi_example.dylib go/uniffi_example/
+	cp ../target/debug/libuniffi_example.dylib go/
 
 run: generate
-	cd go && CGO_LDFLAGS="-L./uniffi_example -luniffi_example" go run main.go
+	cd go && CGO_LDFLAGS="-L. -luniffi_example" go run main.go

@@ -1917,10 +1917,24 @@ dependencies = [
  "serde",
  "serde-big-array",
  "snafu",
- "sync_wrapper",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "iroh-smol-kv-uniffi"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "iroh",
+ "iroh-gossip",
+ "iroh-smol-kv",
+ "irpc",
+ "n0-future 0.2.0",
+ "snafu",
+ "sync_wrapper",
+ "tokio",
  "uniffi",
 ]
 
@@ -4114,6 +4128,18 @@ dependencies = [
 name = "uniffi-example"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "iroh",
+ "iroh-base",
+ "iroh-gossip",
+ "iroh-smol-kv",
+ "iroh-smol-kv-uniffi",
+ "irpc",
+ "n0-future 0.2.0",
+ "rand 0.8.5",
+ "snafu",
+ "sync_wrapper",
+ "tokio",
  "uniffi",
 ]
 

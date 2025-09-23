@@ -36,7 +36,7 @@ sync_wrapper = { version = "1.0.2", optional = true }
 [features]
 filter-parser = ["dep:chrono", "dep:peg"]
 uniffi = ["dep:uniffi", "dep:sync_wrapper"]
-default = ["filter-parser", "uniffi"]
+default = ["filter-parser"]
 
 [dev-dependencies]
 clap = { version = "4.5.47", features = ["derive"] }

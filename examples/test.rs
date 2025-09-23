@@ -70,10 +70,10 @@ async fn main() -> n0_snafu::Result<()> {
         while let Some(item) = sub.next().await {
             match item {
                 Ok((scope, key, value)) => {
-                    println!("Update from {scope}: key={:?} value={:?}", key, value);
+                    println!("Update from {scope}: key={key:?} value={value:?}");
                 }
                 Err(e) => {
-                    println!("Error in subscription: {:?}", e);
+                    println!("Error in subscription: {e:?}");
                     break;
                 }
             }

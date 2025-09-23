@@ -72,12 +72,12 @@ async fn handle_subscription(id: usize, sub: SubscribeResult) {
             }
             Ok(SubscribeItem::CurrentDone) => {}
             Err(e) => {
-                println!("#{}: Error in subscription: {:?}", id, e);
+                println!("#{id}: Error in subscription: {e:?}");
                 break;
             }
         }
     }
-    println!("#{} ended", id);
+    println!("#{id} ended");
 }
 
 #[tokio::main]
@@ -181,9 +181,9 @@ async fn main() -> n0_snafu::Result<()> {
                     Command::Unsubscribe { id } => {
                         if let Some(handle) = subscribers.remove(&id) {
                             drop(handle); // Dropping the handle will abort the task
-                            println!("#{} unsubscribed", id);
+                            println!("#{id} unsubscribed");
                         } else {
-                            println!("#{} does not exist", id);
+                            println!("#{id} does not exist");
                         }
                     }
                     Command::Quit => {
@@ -228,7 +228,7 @@ Filter syntax:
                         );
                     }
                     Command::Other { raw } => {
-                        println!("Unrecognized command: {}", raw);
+                        println!("Unrecognized command: {raw}");
                     }
                 }
             }

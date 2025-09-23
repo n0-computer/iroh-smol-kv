@@ -268,11 +268,10 @@ pub mod api {
 
         /// Checks if the given scope and key match the filter, excluding timestamp.
         pub fn contains_key(&self, scope: &PublicKey, key: &[u8]) -> bool {
-            if let Some(scopes) = &self.scope {
-                if !scopes.contains(scope) {
+            if let Some(scopes) = &self.scope
+                && !scopes.contains(scope) {
                     return false;
                 }
-            }
             self.key.contains(key)
         }
     }
@@ -302,7 +301,7 @@ pub mod api {
         {
             async move {
                 let rx = self.0.await?;
-                Ok(rx.into_stream().map_err(|e| irpc::Error::from(e)))
+                Ok(rx.into_stream().map_err(irpc::Error::from))
             }
             .try_flatten_stream()
         }
@@ -322,7 +321,7 @@ pub mod api {
                             SubscribeItem::CurrentDone => Ok(None),
                         }
                     })
-                    .map_err(|e| irpc::Error::from(e)))
+                    .map_err(irpc::Error::from))
             }
             .try_flatten_stream()
         }
@@ -585,7 +584,7 @@ pub mod api {
             for (scope, map) in self.state.current.iter() {
                 for (key, value) in map.iter() {
                     if value.timestamp < horizon {
-                        expired.push((scope.clone(), key.clone(), value.timestamp));
+                        expired.push((*scope, key.clone(), value.timestamp));
                     }
                 }
             }
@@ -594,7 +593,7 @@ pub mod api {
                 let entry = self.state.current.get_mut(scope).expect("just checked");
                 entry.remove_mut(key);
                 if entry.is_empty() {
-                    expired_scopes.insert(scope.clone());
+                    expired_scopes.insert(*scope);
                 }
             }
             for scope in expired_scopes {
@@ -626,7 +625,7 @@ pub mod api {
             let mut buf = BytesMut::with_capacity(4096);
             for (scope, key, signed_value) in to_publish {
                 let gossip_msg =
-                    GossipMessage::SignedValue(scope.clone(), key.clone(), signed_value.clone());
+                    GossipMessage::SignedValue(*scope, key.clone(), signed_value.clone());
                 let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
                 trace!(
                     "Anti-entropy publishing key={:?} at={:?}",
@@ -646,7 +645,7 @@ pub mod api {
         ) -> Result<(), irpc::Error> {
             for (scope, key, signed_value) in snapshot.flatten_filtered(filter) {
                 tx.send(SubscribeItem::Entry((
-                    scope.clone(),
+                    *scope,
                     key.clone(),
                     signed_value.clone(),
                 )))
@@ -661,11 +660,10 @@ pub mod api {
             current: Option<State>,
             future: Option<tokio::sync::broadcast::Receiver<BroadcastItem>>,
         ) {
-            if let Some(snapshot) = current {
-                if Self::iter_current(&tx, &snapshot, &filter).await.is_err() {
+            if let Some(snapshot) = current
+                && Self::iter_current(&tx, &snapshot, &filter).await.is_err() {
                     return;
                 }
-            }
             let Some(mut broadcast_rx) = future else {
                 return;
             };
@@ -718,7 +716,7 @@ pub mod api {
                             Message::Put(msg) => {
                                 self.state.insert_signed_value_unverified(msg.scope, msg.key.clone(), msg.value.clone())
                                     .expect("inserting local value should always work");
-                                let gossip_msg = GossipMessage::SignedValue(msg.scope.clone(), msg.key.clone(), msg.value.clone());
+                                let gossip_msg = GossipMessage::SignedValue(msg.scope, msg.key.clone(), msg.value.clone());
                                 let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
                                 self.sender.broadcast(gossip_msg).await.ok();
                                 self.broadcast_tx.send(BroadcastItem::Entry((msg.scope, msg.key.clone(), msg.value.clone()))).ok();
@@ -786,12 +784,11 @@ pub mod api {
                         };
                         match msg {
                             GossipMessage::SignedValue(scope, key, value) => {
-                                if let Some(horizon) = self.horizon() {
-                                    if value.timestamp < horizon {
+                                if let Some(horizon) = self.horizon()
+                                    && value.timestamp < horizon {
                                         trace!("Ignoring value key={:?} epoch={} below horizon", key, value.timestamp);
                                         continue;
                                     }
-                                }
                                 let id = scope.fmt_short();
                                 trace!(%id, "Received signed value key={:?} epoch={}", key, value.timestamp);
                                 let Ok(_) = self.state.insert_signed_value(scope, key.clone(), value.clone()) else {
@@ -979,12 +976,11 @@ mod peg_parser {
             let mut parts = Vec::new();
 
             // Handle scope
-            if let Some(scopes) = &self.scope {
-                if !scopes.is_empty() {
+            if let Some(scopes) = &self.scope
+                && !scopes.is_empty() {
                     let scope_list: Vec<String> = scopes.iter().map(|k| k.to_string()).collect();
                     parts.push(format!("scope={{{}}}", scope_list.join(",")));
                 }
-            }
 
             // Handle key range
             match &self.key {
@@ -1010,7 +1006,7 @@ mod peg_parser {
                         _ => "..",
                     };
 
-                    parts.push(format!("key={}{}{}", start_str, op, end_str));
+                    parts.push(format!("key={start_str}{op}{end_str}"));
                 }
             }
 
@@ -1041,7 +1037,7 @@ mod peg_parser {
                         _ => "..",
                     };
 
-                    parts.push(format!("time={}{}{}", start_str, op, end_str));
+                    parts.push(format!("time={start_str}{op}{end_str}"));
                 }
             }
 
@@ -1344,13 +1340,11 @@ pub mod uniffi_support {
                 size: key.len() as u64,
             });
         }
-        Ok(
-            PublicKey::from_bytes(&key.try_into().expect("len checked")).map_err(|e| {
+        PublicKey::from_bytes(&key.try_into().expect("len checked")).map_err(|e| {
                 PublicKeyError::Invalid {
                     message: e.to_string(),
                 }
-            })?,
-        )
+            })
     }
 
     #[uniffi::export]
@@ -1480,6 +1474,7 @@ pub mod uniffi_support {
     }
 
     #[derive(uniffi::Object)]
+    #[allow(clippy::type_complexity)]
     pub struct SubscribeResponse {
         inner: Mutex<
             Pin<

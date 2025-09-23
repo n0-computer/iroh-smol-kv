@@ -30,7 +30,7 @@ tracing = "0.1.41"
 
 chrono = { version = "0.4.42", optional = true }
 peg = { version = "0.8.5", optional = true }
-uniffi = { version = "0.29.4", optional = true }
+uniffi = { version = "0.28.3", optional = true }
 sync_wrapper = { version = "1.0.2", optional = true }
 
 [features]
@@ -43,3 +43,6 @@ clap = { version = "4.5.47", features = ["derive"] }
 iroh-base = "0.92"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 n0-snafu = "0.2.1"
+
+[workspace]
+members = ["uniffi-example"]

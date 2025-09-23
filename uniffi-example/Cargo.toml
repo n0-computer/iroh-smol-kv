@@ -1,0 +1,15 @@
+[package]
+name = "uniffi-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# iroh = "0.92.0"
+# iroh-smol-kv = { version = "0.1.0", path = ".." }
+uniffi = { version = "0.28.3", features = [] }
+
+[build-dependencies]
+uniffi = { version = "0.28.3", features = ["build"] }
+
+[lib]
+crate-type = ["cdylib"]

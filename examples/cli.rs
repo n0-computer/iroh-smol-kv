@@ -7,7 +7,7 @@ use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
     Config,
-    api::{self, Filter, Subscribe, SubscribeResponse, SubscribeResult},
+    api::{self, Filter, Subscribe, SubscribeItem, SubscribeResult},
     util::format_bytes,
 };
 use n0_future::{StreamExt, task::AbortOnDropHandle};
@@ -52,7 +52,7 @@ async fn handle_subscription(id: usize, sub: SubscribeResult) {
     tokio::pin!(stream);
     while let Some(item) = stream.next().await {
         match item {
-            Ok(SubscribeResponse::Entry((scope, key, value))) => {
+            Ok(SubscribeItem::Entry((scope, key, value))) => {
                 println!(
                     "#{}: ({},{},{})",
                     id,
@@ -61,7 +61,7 @@ async fn handle_subscription(id: usize, sub: SubscribeResult) {
                     format_bytes(&value.value)
                 );
             }
-            Ok(SubscribeResponse::Expired((scope, key, timestamp))) => {
+            Ok(SubscribeItem::Expired((scope, key, timestamp))) => {
                 println!(
                     "#{}: expired ({},{},{})",
                     id,
@@ -70,7 +70,7 @@ async fn handle_subscription(id: usize, sub: SubscribeResult) {
                     timestamp,
                 );
             }
-            Ok(SubscribeResponse::CurrentDone) => {}
+            Ok(SubscribeItem::CurrentDone) => {}
             Err(e) => {
                 println!("#{}: Error in subscription: {:?}", id, e);
                 break;
@@ -360,7 +360,7 @@ mod command_parser {
     impl FromStr for Command {
         type Err = String;
         fn from_str(s: &str) -> Result<Self, Self::Err> {
-            cmd_parser::command(s).map_err(|e| format!("Parse error: {}", e))
+            cmd_parser::command(s).map_err(|e| format!("Parse error: {e}"))
         }
     }
 }

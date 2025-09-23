@@ -8,6 +8,9 @@ authors = ["rklaehn <rklaehn@protonmail.com>", "n0 team"]
 repository = "https://github.com/n0-computer/iroh-smol-kv"
 keywords = ["gossip", "kv", "p2p", "iroh"]
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 bytes = { version = "1.10.1", features = ["serde"] }
 ed25519-dalek = { version = "2.2.0", features = ["signature"] }
@@ -27,13 +30,16 @@ tracing = "0.1.41"
 
 chrono = { version = "0.4.42", optional = true }
 peg = { version = "0.8.5", optional = true }
+uniffi = { version = "0.29.4", optional = true }
+sync_wrapper = { version = "1.0.2", optional = true }
 
 [features]
 filter-parser = ["dep:chrono", "dep:peg"]
-default = ["filter-parser"]
+uniffi = ["dep:uniffi", "dep:sync_wrapper"]
+default = ["filter-parser", "uniffi"]
 
 [dev-dependencies]
 clap = { version = "4.5.47", features = ["derive"] }
-iroh-base = "0.91.2"
+iroh-base = "0.92"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 n0-snafu = "0.2.1"

@@ -75,7 +75,7 @@ impl Db {
             })?;
         let ids = keys
             .iter()
-            .map(|k| k.node_addr().node_id.as_ref().to_vec())
+            .map(|k| Arc::new(k.node_addr().node_id.into()))
             .collect::<Vec<_>>();
         for ticket in keys {
             self.router
@@ -97,8 +97,8 @@ impl Db {
         self.router.endpoint().secret_key().to_bytes().to_vec()
     }
 
-    pub fn public(&self) -> Vec<u8> {
-        self.router.endpoint().node_id().as_ref().to_vec()
+    pub fn public(&self) -> Arc<kv::PublicKey> {
+        Arc::new(self.router.endpoint().node_id().into())
     }
 }
 

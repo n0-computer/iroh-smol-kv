@@ -52,7 +52,7 @@ func main() {
 	panicIfErr(err)
 	fmt.Println("Get value", val)
 
-	filter, err := uniffi_example.ParseFilter("")
+	filter, err := uniffi_example.FilterParse("")
 	panicIfErr(err)
 	stream, err := client.Subscribe(filter, uniffi_example.SubscribeModeBoth)
 	panicIfErr(err)

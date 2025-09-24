@@ -1,12 +1,96 @@
-use std::{collections::HashSet, ops::Bound, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashSet, ops::{Bound}, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use iroh::{PublicKey, SecretKey};
+use iroh::{SecretKey};
 use iroh_gossip::api::GossipTopic;
 use iroh_smol_kv::{self as w};
 use n0_future::{Stream, StreamExt};
 use snafu::Snafu;
 use tokio::sync::Mutex;
+
+/// A public key.
+///
+/// The key itself is just a 32 byte array, but a key has associated crypto
+/// information that is cached for performance reasons.
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialOrd, uniffi::Object)]
+#[uniffi::export(Display)]
+pub struct PublicKey {
+    pub(crate) key: [u8; 32],
+}
+
+impl From<iroh::PublicKey> for PublicKey {
+    fn from(key: iroh::PublicKey) -> Self {
+        PublicKey {
+            key: *key.as_bytes(),
+        }
+    }
+}
+
+impl From<&PublicKey> for iroh::PublicKey {
+    fn from(key: &PublicKey) -> Self {
+        iroh::PublicKey::from_bytes(&key.key).unwrap()
+    }
+}
+
+#[uniffi::export]
+impl PublicKey {
+    /// Returns true if the PublicKeys are equal
+    pub fn equal(&self, other: &PublicKey) -> bool {
+        *self == *other
+    }
+
+    /// Express the PublicKey as a byte array
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.key.to_vec()
+    }
+
+    /// Make a PublicKey from base32 string
+    #[uniffi::constructor]
+    #[allow(clippy::result_large_err)]
+    pub fn from_string(s: String) -> Result<Self, PublicKeyError> {
+        if s.len() != 64 {
+            return Err(PublicKeyError::Length {
+                size: s.len() as u64,
+            });
+        }
+        let key = iroh::PublicKey::from_str(&s).map_err(|e| PublicKeyError::Invalid {
+            message: e.to_string(),
+        })?;
+        Ok(key.into())
+    }
+
+    /// Make a PublicKey from byte array
+    #[uniffi::constructor]
+    #[allow(clippy::result_large_err)]
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, PublicKeyError> {
+        if bytes.len() != 32 {
+            return Err(PublicKeyError::Length {
+                size: bytes.len() as u64,
+            });
+        }
+        let bytes: [u8; 32] = bytes.try_into().expect("checked above");
+        let key = iroh::PublicKey::from_bytes(&bytes).map_err(|e| PublicKeyError::Invalid { message: e.to_string() })?;
+        Ok(key.into())
+    }
+
+    /// Convert to a base32 string limited to the first 10 bytes for a friendly string
+    /// representation of the key.
+    pub fn fmt_short(&self) -> String {
+        iroh::PublicKey::from(self).fmt_short()
+    }
+}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &PublicKey) -> bool {
+        self.key == other.key
+    }
+}
+
+impl std::fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        iroh::PublicKey::from(self).fmt(f)
+    }
+}
 
 #[derive(uniffi::Enum, Debug, Clone, Copy)]
 pub enum SubscribeMode {
@@ -95,7 +179,7 @@ pub struct Filter {
     max_key: KeyBound,
     min_time: TimeBound,
     max_time: TimeBound,
-    scope: Vec<Vec<u8>>,
+    scope: Vec<Arc<PublicKey>>,
 }
 
 impl From<w::Filter> for Filter {
@@ -106,7 +190,7 @@ impl From<w::Filter> for Filter {
         let max_time = f.timestamp.1.into();
         let scope = f
             .scope
-            .map(|s| s.into_iter().map(|k| k.as_ref().to_vec()).collect())
+            .map(|s| s.into_iter().map(|k| Arc::new(PublicKey::from(k))).collect())
             .unwrap_or_default();
         Self {
             min_key,
@@ -118,10 +202,9 @@ impl From<w::Filter> for Filter {
     }
 }
 
-impl TryFrom<Filter> for w::Filter {
-    type Error = PublicKeyError;
+impl From<Filter> for w::Filter {
 
-    fn try_from(f: Filter) -> Result<Self, Self::Error> {
+    fn from(f: Filter) -> Self {
         let min_key = f.min_key.into();
         let max_key = f.max_key.into();
         let min_time = f.min_time.into();
@@ -131,16 +214,15 @@ impl TryFrom<Filter> for w::Filter {
         } else {
             let mut set = HashSet::with_capacity(f.scope.len());
             for k in f.scope {
-                let pk = parse_public_key(&k)?;
-                set.insert(pk);
+                set.insert(iroh::PublicKey::from(k.as_ref()));
             }
             Some(set)
         };
-        Ok(w::Filter {
+        w::Filter {
             key: (min_key, max_key),
             timestamp: (min_time, max_time),
             scope,
-        })
+        }
     }
 }
 
@@ -187,10 +269,6 @@ pub enum PutError {
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum JoinPeersError {
-    #[snafu(transparent)]
-    Key {
-        source: PublicKeyError,
-    },
     Irpc {
         message: String,
     },
@@ -199,38 +277,9 @@ pub enum JoinPeersError {
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum GetError {
-    #[snafu(transparent)]
-    InvalidKey {
-        source: PublicKeyError,
-    },
     Irpc {
         message: String,
     },
-}
-
-fn parse_public_key(key: &[u8]) -> Result<PublicKey, PublicKeyError> {
-    if key.len() != 32 {
-        return Err(PublicKeyError::Length {
-            size: key.len() as u64,
-        });
-    }
-    PublicKey::from_bytes(&key.try_into().expect("len checked")).map_err(|e| {
-        PublicKeyError::Invalid {
-            message: e.to_string(),
-        }
-    })
-}
-
-#[uniffi::export]
-pub fn parse_filter(text: String) -> Result<Arc<Filter>, FilterParseError> {
-    use std::str::FromStr;
-
-    iroh_smol_kv::Filter::from_str(&text)
-        .map_err(|e| FilterParseError::Invalid {
-            message: e.to_string(),
-        })
-        .map(Into::into)
-        .map(Arc::new)
 }
 
 #[uniffi::export]
@@ -246,13 +295,26 @@ impl Filter {
         })
     }
 
-    pub fn scopes(mut self: Arc<Self>, scopes: Vec<Vec<u8>>) -> Arc<Self> {
+    #[uniffi::constructor]
+    pub fn parse(text: String) -> Result<Arc<Self>, FilterParseError> {
+        use std::str::FromStr;
+
+        iroh_smol_kv::Filter::from_str(&text)
+            .map_err(|e| FilterParseError::Invalid {
+                message: e.to_string(),
+            })
+            .map(Into::into)
+            .map(Arc::new)
+    }
+
+
+    pub fn scopes(mut self: Arc<Self>, scopes: Vec<Arc<PublicKey>>) -> Arc<Self> {
         let this = Arc::make_mut(&mut self);
         this.scope = scopes;
         self
     }
 
-    pub fn scope(self: Arc<Self>, scope: Vec<u8>) -> Arc<Self> {
+    pub fn scope(self: Arc<Self>, scope: Arc<PublicKey>) -> Arc<Self> {
         self.scopes(vec![scope])
     }
 
@@ -298,50 +360,33 @@ pub enum SubscribeNextError {
     Irpc { message: String },
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct SignedValue {
-    pub timestamp: u64,
-    pub value: Vec<u8>,
-    pub signature: Vec<u8>,
-}
+#[derive(Debug, Clone, uniffi::Object)]
+#[uniffi::export(Debug)]
+pub struct SignedValue(w::SignedValue);
 
 impl From<w::SignedValue> for SignedValue {
     fn from(v: w::SignedValue) -> Self {
-        Self {
-            timestamp: v.timestamp,
-            value: v.value.to_vec(),
-            signature: v.signature.to_vec(),
-        }
+        Self(v)
     }
 }
 
-impl TryFrom<SignedValue> for w::SignedValue {
-    type Error = SignatureError;
+impl From<SignedValue> for w::SignedValue {
 
-    fn try_from(v: SignedValue) -> Result<Self, Self::Error> {
-        Ok(Self {
-            timestamp: v.timestamp,
-            value: v.value.into(),
-            signature: v
-                .signature
-                .try_into()
-                .map_err(|e: Vec<u8>| SignatureError::Length {
-                    size: e.len() as u64,
-                })?,
-        })
+    fn from(v: SignedValue) -> Self {
+        v.0
     }
 }
 
 #[derive(Clone, uniffi::Enum)]
 pub enum SubscribeItem {
     Entry {
-        scope: Vec<u8>,
+        scope: Arc<PublicKey>,
         key: Vec<u8>,
-        value: SignedValue,
+        value: Arc<SignedValue>,
     },
     CurrentDone,
     Expired {
-        scope: Vec<u8>,
+        scope: Arc<PublicKey>,
         key: Vec<u8>,
         timestamp: u64,
     },
@@ -356,26 +401,25 @@ impl std::fmt::Debug for SubscribeItem {
     }
 }
 
-impl TryFrom<SubscribeItem> for w::SubscribeItem {
-    type Error = TryFromSubscribeItemError;
+impl From<SubscribeItem> for w::SubscribeItem {
 
-    fn try_from(item: SubscribeItem) -> Result<Self, Self::Error> {
+    fn from(item: SubscribeItem) -> Self {
         match item {
-            SubscribeItem::Entry { scope, key, value } => Ok(w::SubscribeItem::Entry((
-                parse_public_key(&scope)?,
+            SubscribeItem::Entry { scope, key, value } => w::SubscribeItem::Entry((
+                iroh::PublicKey::from(scope.as_ref()),
                 key.into(),
-                value.try_into()?,
-            ))),
-            SubscribeItem::CurrentDone => Ok(w::SubscribeItem::CurrentDone),
+                w::SignedValue::from(value.as_ref().clone()),
+            )),
+            SubscribeItem::CurrentDone => w::SubscribeItem::CurrentDone,
             SubscribeItem::Expired {
                 scope,
                 key,
                 timestamp,
-            } => Ok(w::SubscribeItem::Expired((
-                parse_public_key(&scope)?,
+            } => w::SubscribeItem::Expired((
+                iroh::PublicKey::from(scope.as_ref()),
                 key.into(),
                 timestamp,
-            ))),
+            )),
         }
     }
 }
@@ -384,13 +428,13 @@ impl From<w::SubscribeItem> for SubscribeItem {
     fn from(item: w::SubscribeItem) -> Self {
         match item {
             w::SubscribeItem::Entry((scope, key, value)) => SubscribeItem::Entry {
-                scope: scope.as_ref().to_vec(),
+                scope: Arc::new(PublicKey::from(scope)),
                 key: key.to_vec(),
-                value: value.into(),
+                value: Arc::new(SignedValue::from(value)),
             },
             w::SubscribeItem::CurrentDone => SubscribeItem::CurrentDone,
             w::SubscribeItem::Expired((scope, key, timestamp)) => SubscribeItem::Expired {
-                scope: scope.as_ref().to_vec(),
+                scope: Arc::new(PublicKey::from(scope)),
                 key: key.to_vec(),
                 timestamp,
             },
@@ -525,11 +569,10 @@ impl Client {
         Ok(Arc::new(WriteScope { write }))
     }
 
-    pub async fn get(&self, scope: Vec<u8>, key: Vec<u8>) -> Result<Option<Vec<u8>>, GetError> {
-        let scope = parse_public_key(&scope)?;
+    pub async fn get(&self, scope: Arc<PublicKey>, key: Vec<u8>) -> Result<Option<Vec<u8>>, GetError> {
         let res = self
             .client
-            .get(scope, key)
+            .get(iroh::PublicKey::from(scope.as_ref()), key)
             .await
             .map_err(|e| GetError::Irpc {
                 message: e.to_string(),
@@ -542,7 +585,7 @@ impl Client {
         filter: Arc<Filter>,
         mode: SubscribeMode,
     ) -> Result<Arc<SubscribeResponse>, PublicKeyError> {
-        let filter: w::Filter = (*filter).clone().try_into()?;
+        let filter: w::Filter = (*filter).clone().into();
         let stream = self
             .client
             .subscribe_with_opts(w::Subscribe {
@@ -555,11 +598,11 @@ impl Client {
         }))
     }
 
-    pub async fn join_peers(&self, peers: Vec<Vec<u8>>) -> Result<(), JoinPeersError> {
+    pub async fn join_peers(&self, peers: Vec<Arc<PublicKey>>) -> Result<(), JoinPeersError> {
         let peers = peers
             .into_iter()
-            .map(|p| parse_public_key(&p))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|p| iroh::PublicKey::from(p.as_ref()))
+            .collect::<Vec<_>>();
 
         self.client
             .join_peers(peers)

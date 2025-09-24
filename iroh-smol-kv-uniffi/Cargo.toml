@@ -21,4 +21,3 @@ snafu = "0.8.9"
 tokio = "1.47.1"
 uniffi = "0.28.3"
 iroh-smol-kv = { version = "0.1.0", path = ".." }
-sync_wrapper = { version = "1.0.2" }

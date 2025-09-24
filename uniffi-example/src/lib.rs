@@ -143,15 +143,4 @@ impl Db {
     }
 }
 
-#[uniffi::export]
-pub async fn hello(name: &str) -> String {
-    format!("Hello, {name}!")
-}
-
-// Add functions that use the types
-#[uniffi::export]
-pub fn create_filter() -> Arc<kv::Filter> {
-    kv::Filter::new()
-}
-
 uniffi::setup_scaffolding!();

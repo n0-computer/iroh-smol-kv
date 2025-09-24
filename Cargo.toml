@@ -27,6 +27,7 @@ serde-big-array = "0.5.1"
 snafu = "0.8.9"
 tokio = "1.47.1"
 tracing = "0.1.41"
+sync_wrapper = "1"
 
 chrono = { version = "0.4.42", optional = true }
 peg = { version = "0.8.5", optional = true }

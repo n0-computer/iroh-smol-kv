@@ -76,6 +76,7 @@ pub mod api {
     use rand::seq::SliceRandom;
     use serde::{Deserialize, Serialize};
     use snafu::Snafu;
+    use sync_wrapper::SyncStream;
     use tokio::sync::broadcast;
     use tracing::{error, trace};
 
@@ -305,33 +306,38 @@ pub mod api {
         /// Stream of entries from the subscription, as raw SubscribeResponse values.
         pub fn stream_raw(
             self,
-        ) -> impl n0_future::Stream<Item = Result<SubscribeItem, irpc::Error>> + Send + 'static
+        ) -> impl n0_future::Stream<Item = Result<SubscribeItem, irpc::Error>> + Send + Sync + 'static
         {
-            async move {
-                let rx = self.0.await?;
-                Ok(rx.into_stream().map_err(irpc::Error::from))
-            }
-            .try_flatten_stream()
+            SyncStream::new(
+                async move {
+                    let rx = self.0.await?;
+                    Ok(rx.into_stream().map_err(irpc::Error::from))
+                }
+                .try_flatten_stream(),
+            )
         }
 
         /// Stream of entries from the subscription, without distinguishing current vs future.
         pub fn stream(
             self,
-        ) -> impl n0_future::Stream<Item = Result<Entry, irpc::Error>> + Send + 'static {
-            async move {
-                let rx = self.0.await?;
-                Ok(rx
-                    .into_stream()
-                    .try_filter_map(|res| async move {
-                        match res {
-                            SubscribeItem::Entry(entry) => Ok(Some(entry)),
-                            SubscribeItem::Expired((_, _, _)) => Ok(None),
-                            SubscribeItem::CurrentDone => Ok(None),
-                        }
-                    })
-                    .map_err(irpc::Error::from))
-            }
-            .try_flatten_stream()
+        ) -> impl n0_future::Stream<Item = Result<Entry, irpc::Error>> + Send + Sync + 'static
+        {
+            SyncStream::new(
+                async move {
+                    let rx = self.0.await?;
+                    Ok(rx
+                        .into_stream()
+                        .try_filter_map(|res| async move {
+                            match res {
+                                SubscribeItem::Entry(entry) => Ok(Some(entry)),
+                                SubscribeItem::Expired((_, _, _)) => Ok(None),
+                                SubscribeItem::CurrentDone => Ok(None),
+                            }
+                        })
+                        .map_err(irpc::Error::from))
+                }
+                .try_flatten_stream(),
+            )
         }
     }
 

@@ -401,7 +401,7 @@ impl From<w::SubscribeItem> for SubscribeItem {
 #[uniffi::export]
 pub fn subscribe_item_debug(item: &SubscribeItem) -> String {
     // By reference
-    format!("{:?}", item)
+    format!("{item:?}")
 }
 
 #[derive(uniffi::Object)]

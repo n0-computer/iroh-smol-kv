@@ -1,10 +1,10 @@
 //! A small, gossip-based, eventually consistent key-value store.
 //!
 //! The entry point is the [`Client`] struct, which can be created with a
-//! [`GossipTopic`](iroh_gossip::api::GossipTopic) and a [`Config`].
+//! [`GossipTopic`] and a [`Config`].
 //!
 //! Writing to the store requires a [`WriteScope`], which is created
-//! from the client using a [`SecretKey`](iroh::SecretKey).
+//! from the client using a [`SecretKey`].
 //!
 //! You can read from the store with [`Client::get`], but mostly you will
 //! create a subscription using [`Client::subscribe`] and then get updates

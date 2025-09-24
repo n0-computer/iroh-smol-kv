@@ -174,12 +174,6 @@ pub enum TryFromSubscribeItemError {
 
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
-pub enum CreateClientError {
-    Invalid,
-}
-
-#[derive(Debug, Snafu, uniffi::Error)]
-#[snafu(module)]
 pub enum FilterParseError {
     Invalid { message: String },
 }

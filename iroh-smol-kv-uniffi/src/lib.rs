@@ -167,6 +167,21 @@ macro_rules! generate_uniffi_support {
 
             #[derive(Debug, Snafu, uniffi::Error)]
             #[snafu(module)]
+            pub enum SignatureError {
+                Length { size: u64 },
+            }
+
+            #[derive(Debug, Snafu, uniffi::Error)]
+            #[snafu(module)]
+            pub enum TryFromSubscribeItemError {
+                #[snafu(transparent)]
+                PublicKey { source: PublicKeyError },
+                #[snafu(transparent)]
+                Signature { source: SignatureError },
+            }
+
+            #[derive(Debug, Snafu, uniffi::Error)]
+            #[snafu(module)]
             pub enum CreateClientError {
                 Invalid,
             }
@@ -209,37 +224,26 @@ macro_rules! generate_uniffi_support {
             }
 
             #[uniffi::export]
+            pub fn parse_filter(text: String) -> Result<Arc<Filter>, FilterParseError> {
+                use std::str::FromStr;
+
+                iroh_smol_kv::api::Filter::from_str(&text)
+                    .map_err(|e| FilterParseError::Invalid {
+                        message: e.to_string(),
+                    })
+                    .map(Into::into)
+                    .map(Arc::new)
+            }
+
+            #[uniffi::export]
             impl Filter {
                 #[uniffi::constructor]
-                pub fn parse(text: String) -> Result<Arc<Self>, FilterParseError> {
-                    use std::str::FromStr;
-
-                    iroh_smol_kv::api::Filter::from_str(&text)
-                        .map_err(|e| FilterParseError::Invalid {
-                            message: e.to_string(),
-                        })
-                        .map(Into::into)
-                        .map(Arc::new)
-                }
-
-                #[uniffi::constructor]
-                pub fn all() -> Arc<Self> {
+                pub fn new() -> Arc<Self> {
                     Arc::new(Self {
                         min_key: KeyBound::Unbounded,
                         max_key: KeyBound::Unbounded,
                         min_time: TimeBound::Unbounded,
                         max_time: TimeBound::Unbounded,
-                        scope: Vec::new(),
-                    })
-                }
-
-                #[uniffi::constructor]
-                pub fn empty() -> Arc<Self> {
-                    Arc::new(Self {
-                        min_key: KeyBound::Unbounded,
-                        max_key: KeyBound::Excluded(vec![]),
-                        min_time: TimeBound::Unbounded,
-                        max_time: TimeBound::Excluded(0),
                         scope: Vec::new(),
                     })
                 }
@@ -300,13 +304,45 @@ macro_rules! generate_uniffi_support {
                 Irpc { message: String },
             }
 
-            #[derive(uniffi::Enum, Debug)]
+            #[derive(Debug, Clone, uniffi::Record)]
+            pub struct SignedValue {
+                pub timestamp: u64,
+                pub value: Vec<u8>,
+                pub signature: Vec<u8>,
+            }
+
+            impl From<api::SignedValue> for SignedValue {
+                fn from(v: api::SignedValue) -> Self {
+                    Self {
+                        timestamp: v.timestamp,
+                        value: v.value.to_vec(),
+                        signature: v.signature.to_vec(),
+                    }
+                }
+            }
+
+            impl TryFrom<SignedValue> for api::SignedValue {
+                type Error = SignatureError;
+
+                fn try_from(v: SignedValue) -> Result<Self, Self::Error> {
+                    Ok(Self {
+                        timestamp: v.timestamp,
+                        value: v.value.into(),
+                        signature: v.signature.try_into().map_err(|e: Vec<u8>| {
+                            SignatureError::Length {
+                                size: e.len() as u64,
+                            }
+                        })?,
+                    })
+                }
+            }
+
+            #[derive(Clone, uniffi::Enum)]
             pub enum SubscribeItem {
                 Entry {
                     scope: Vec<u8>,
                     key: Vec<u8>,
-                    timestamp: u64,
-                    value: Vec<u8>,
+                    value: SignedValue,
                 },
                 CurrentDone,
                 Expired {
@@ -316,25 +352,65 @@ macro_rules! generate_uniffi_support {
                 },
             }
 
+            impl std::fmt::Debug for SubscribeItem {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match api::SubscribeItem::try_from(self.clone()) {
+                        Ok(item) => write!(f, "{item:?}"),
+                        Err(e) => write!(f, "Invalid({e})"),
+                    }
+                }
+            }
+
+            impl TryFrom<SubscribeItem> for api::SubscribeItem {
+                type Error = TryFromSubscribeItemError;
+
+                fn try_from(item: SubscribeItem) -> Result<Self, Self::Error> {
+                    match item {
+                        SubscribeItem::Entry { scope, key, value } => {
+                            Ok(api::SubscribeItem::Entry((
+                                parse_public_key(&scope)?,
+                                key.into(),
+                                value.try_into()?,
+                            )))
+                        }
+                        SubscribeItem::CurrentDone => Ok(api::SubscribeItem::CurrentDone),
+                        SubscribeItem::Expired {
+                            scope,
+                            key,
+                            timestamp,
+                        } => Ok(api::SubscribeItem::Expired((
+                            parse_public_key(&scope)?,
+                            key.into(),
+                            timestamp,
+                        ))),
+                    }
+                }
+            }
+
             impl From<api::SubscribeItem> for SubscribeItem {
                 fn from(item: api::SubscribeItem) -> Self {
                     match item {
                         api::SubscribeItem::Entry((scope, key, value)) => SubscribeItem::Entry {
-                            scope: scope.to_vec(),
+                            scope: scope.as_ref().to_vec(),
                             key: key.to_vec(),
-                            timestamp: value.timestamp,
-                            value: value.value.to_vec(),
+                            value: value.into(),
                         },
                         api::SubscribeItem::CurrentDone => SubscribeItem::CurrentDone,
                         api::SubscribeItem::Expired((scope, key, timestamp)) => {
                             SubscribeItem::Expired {
-                                scope: scope.to_vec(),
+                                scope: scope.as_ref().to_vec(),
                                 key: key.to_vec(),
                                 timestamp,
                             }
                         }
                     }
                 }
+            }
+
+            #[uniffi::export]
+            pub fn debug_subscribe_item(item: &SubscribeItem) -> String {
+                // By reference
+                format!("{:?}", item)
             }
 
             #[derive(uniffi::Object)]

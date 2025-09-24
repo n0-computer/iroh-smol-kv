@@ -1,1 +1,4 @@
 /target
+/uniffi-example/go/uniffi_example/*
+/uniffi-example/go/iroh_smol_kv_uniffi/*
+/uniffi-example/go/*.dylib

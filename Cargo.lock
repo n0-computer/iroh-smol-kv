@@ -4140,6 +4140,7 @@ dependencies = [
  "snafu",
  "sync_wrapper",
  "tokio",
+ "tracing-subscriber",
  "uniffi",
 ]
 

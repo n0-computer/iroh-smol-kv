@@ -6,21 +6,14 @@ import (
 	"hello-app/uniffi_example"
 )
 
-func asPlainError(err error) error {
-    if err == nil {
-        return nil
-    }
-    // Assumes all Uniffi errors have AsError(); adjust if multi-type
-    return err.AsError()
-}
-
 func main() {
-	db, err := uniffi_example.NewDb()
-	if err != nil {
-		fmt.Printf("Raw error dump: %#v\n", err)
-		panic(err)
-	}
-	fmt.Println("db created", db)
+	db, _ := uniffi_example.NewDb()
+	// if err != nil {
+	// 	fmt.Printf("Raw error dump: %#v\n", err)
+	// 	panic(err)
+	// }
+	fmt.Println("db created", db.Debug())
+
 	client := db.Client()
 	fmt.Println("Got client", client)
 
@@ -35,7 +28,15 @@ func main() {
 	val, _ := client.Get(db.Public(), []byte("hello"))
 
 	fmt.Println("Got value", val)
-	// fmt.Println(err)
+
+	filter := uniffi_example.NewFilter()
+	stream, _ := client.Subscribe(filter, uniffi_example.SubscribeModeBoth)
+	fmt.Println(stream)
+
+	for {
+		item, _ := stream.NextRaw()
+		fmt.Println("Got item", uniffi_example.DebugSubscribeItem(*item))
+	}
 	// if err != nil {
 	// 	panic(err)
 	// }

@@ -14,8 +14,8 @@ pub mod proto {
     use serde::{Deserialize, Serialize};
     use serde_big_array::BigArray;
 
-    use crate::util::from_nanos;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    use crate::util::{DD, from_nanos};
+    #[derive(Clone, Serialize, Deserialize)]
     pub struct SignedValue {
         /// Timestamp in nanoseconds since epoch
         pub timestamp: u64,
@@ -24,6 +24,16 @@ pub mod proto {
         /// Signature over (key, timestamp, value)
         #[serde(with = "BigArray")]
         pub signature: [u8; 64],
+    }
+
+    impl std::fmt::Debug for SignedValue {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_tuple("SignedValue")
+                .field(&self.timestamp)
+                .field(&self.value)
+                .field(&DD(hex::encode(self.signature)))
+                .finish()
+        }
     }
 
     impl SignedValue {
@@ -69,9 +79,10 @@ pub mod api {
     use tokio::sync::broadcast;
     use tracing::{error, trace};
 
+    pub use crate::proto::SignedValue;
     use crate::{
         Config, Entry, GossipMessage,
-        proto::{SignedValue, SigningData},
+        proto::SigningData,
         util::{current_timestamp, next_prefix, postcard_ser, to_nanos},
     };
 
@@ -865,7 +876,10 @@ impl Default for Config {
 }
 
 pub mod util {
-    use std::time::{Duration, SystemTime};
+    use std::{
+        fmt,
+        time::{Duration, SystemTime},
+    };
 
     use bytes::{Bytes, BytesMut};
     use serde::Serialize;
@@ -946,6 +960,13 @@ pub mod util {
                 c => c.to_string(),
             })
             .collect()
+    }
+    pub(crate) struct DD<T: fmt::Display>(pub T);
+
+    impl<T: fmt::Display> fmt::Debug for DD<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Display::fmt(&self.0, f)
+        }
     }
 }
 

@@ -116,6 +116,7 @@ async fn main() -> n0_snafu::Result<()> {
     } else {
         gossip.subscribe_and_join(topic, bootstrap_ids).await.e()?
     };
+    println!("Joined the network, you can start issuing commands.");
     let api = api::Client::local(topic, Config::DEBUG);
     let ws = api.write(key.clone());
     // Create a reader for stdin

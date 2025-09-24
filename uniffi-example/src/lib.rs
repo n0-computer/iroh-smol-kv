@@ -9,7 +9,7 @@ use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use snafu::Snafu;
 
-pub mod kv {
+mod kv {
     iroh_smol_kv_uniffi::generate_uniffi_support!();
 }
 

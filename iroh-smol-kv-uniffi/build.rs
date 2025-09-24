@@ -23,7 +23,10 @@ fn main() {
 #[macro_export]
 macro_rules! generate_uniffi_support {{
     () => {{
-        {code_content}
+        mod _generate_uniffi_support {{
+          {code_content}
+        }}
+        pub use _generate_uniffi_support::*;
     }};
 }}
 "#

@@ -1,10 +1,12 @@
 use core::fmt;
-use std::sync::{Arc, LazyLock};
+use std::{
+    str::FromStr,
+    sync::{Arc, LazyLock},
+};
 
 use iroh::{SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
-use iroh_smol_kv::Config;
 use snafu::Snafu;
 
 pub mod kv {
@@ -12,6 +14,7 @@ pub mod kv {
 }
 
 #[derive(uniffi::Object)]
+#[uniffi::export(Debug)]
 pub struct Db {
     router: iroh::protocol::Router,
     client: Arc<kv::Client>,
@@ -32,19 +35,58 @@ pub enum CreateError {
     Subscribe { message: String },
 }
 
+#[derive(Debug, Snafu, uniffi::Error)]
+#[snafu(module)]
+pub enum DbJoinPeersError {
+    Ticket {
+        message: String,
+    },
+    AddNodeAddr {
+        message: String,
+    },
+    #[snafu(transparent)]
+    JoinPeers {
+        source: kv::JoinPeersError,
+    },
+}
+
 static RUNTIME: LazyLock<tokio::runtime::Runtime> =
     LazyLock::new(|| tokio::runtime::Runtime::new().unwrap());
 
 #[uniffi::export]
 impl Db {
     #[uniffi::constructor]
-    pub async fn new() -> Result<Arc<Self>, CreateError> {
+    pub async fn new(config: kv::Config) -> Result<Arc<Self>, CreateError> {
         // block on the runtime, since we need one for iroh
-        RUNTIME.block_on(Self::new_impl())
+        RUNTIME.block_on(Self::new_impl(config))
     }
 
     pub fn client(&self) -> Arc<kv::Client> {
         self.client.clone()
+    }
+
+    pub async fn join_peers(&self, peers: Vec<String>) -> Result<(), DbJoinPeersError> {
+        let keys: Vec<NodeTicket> = peers
+            .into_iter()
+            .map(|s| NodeTicket::from_str(&s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbJoinPeersError::Ticket {
+                message: e.to_string(),
+            })?;
+        let ids = keys
+            .iter()
+            .map(|k| k.node_addr().node_id.as_ref().to_vec())
+            .collect::<Vec<_>>();
+        for ticket in keys {
+            self.router
+                .endpoint()
+                .add_node_addr(ticket.node_addr().clone())
+                .map_err(|e| DbJoinPeersError::AddNodeAddr {
+                    message: e.to_string(),
+                })?;
+        }
+        self.client.join_peers(ids).await?;
+        Ok(())
     }
 
     pub fn write_scope(&self) -> Result<Arc<kv::WriteScope>, kv::PrivateKeyError> {
@@ -58,14 +100,10 @@ impl Db {
     pub fn public(&self) -> Vec<u8> {
         self.router.endpoint().node_id().as_ref().to_vec()
     }
-
-    pub fn debug(&self) -> String {
-        format!("{:?}", self)
-    }
 }
 
 impl Db {
-    async fn new_impl() -> Result<Arc<Self>, CreateError> {
+    async fn new_impl(config: kv::Config) -> Result<Arc<Self>, CreateError> {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_thread_ids(true)
@@ -97,7 +135,7 @@ impl Db {
             .map_err(|e| CreateError::Subscribe {
                 message: e.to_string(),
             })?;
-        let api = kv::Client::local(topic, Config::default());
+        let api = kv::Client::local(topic, config);
         Ok(Arc::new(Self {
             router,
             client: Arc::new(api),

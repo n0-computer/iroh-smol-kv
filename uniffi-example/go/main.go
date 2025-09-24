@@ -4,41 +4,62 @@ package main
 import (
 	"fmt"
 	"hello-app/uniffi_example"
+	"reflect"
 )
 
+func isNilError(err error) bool {
+    if err == nil {
+        return true
+    }
+    
+    v := reflect.ValueOf(err)
+    return v.Kind() == reflect.Ptr && v.IsNil()
+}
+
+
+func panicIfErr(err error) {
+	if !isNilError(err) {
+		panic(err)
+	}
+}
+
 func main() {
-	db, _ := uniffi_example.NewDb()
+	config := uniffi_example.NewConfig()
+	config.Expiry.Horizon = 10000000000 // 10s
+	config.Expiry.CheckInterval = 5000000000 // 5s
+	db, _ := uniffi_example.NewDb(config)
 	// if err != nil {
 	// 	fmt.Printf("Raw error dump: %#v\n", err)
 	// 	panic(err)
 	// }
-	fmt.Println("db created", db.Debug())
+	fmt.Println("db created", db.DebugString())
 
 	client := db.Client()
-	fmt.Println("Got client", client)
+	fmt.Println("Got client", client.DebugString())
 
-	write, _ := db.WriteScope()
-	fmt.Println("Got write scope", write)
-	// if err != nil {
-	// 	panic(err)
-	// }
+	err := db.JoinPeers([]string{"nodeadn2h4hsdaa42udk2thwkkrwivtlvtxdnqbojyqe6jg7zgxswqea6ajinb2hi4dthixs6zlvmmys2mjoojswyylzfzxdaltjojxwqltjojxwqltmnfxgwlrpaiaakd3g3wykcayaycuab4vquebq"})
+	panicIfErr(err)
 
-	_ = write.Put([]byte("hello"), []byte("world"))
+	write, err := db.WriteScope()
+	panicIfErr(err)
+	fmt.Println("Got write scope", write.DebugString())
 
-	val, _ := client.Get(db.Public(), []byte("hello"))
+	err = write.Put([]byte("hello"), []byte("world"))
+	panicIfErr(err)
 
-	fmt.Println("Got value", val)
+	val, err := client.Get(db.Public(), []byte("hello"))
+	panicIfErr(err)
+	fmt.Println("Get value", val)
 
-	filter := uniffi_example.NewFilter()
-	stream, _ := client.Subscribe(filter, uniffi_example.SubscribeModeBoth)
-	fmt.Println(stream)
+	filter, err := uniffi_example.ParseFilter("")
+	panicIfErr(err)
+	stream, err := client.Subscribe(filter, uniffi_example.SubscribeModeBoth)
+	panicIfErr(err)
+	fmt.Println("Subscribed to stream", stream.DebugString())
 
 	for {
-		item, _ := stream.NextRaw()
-		fmt.Println("Got item", uniffi_example.DebugSubscribeItem(*item))
+		item, err := stream.NextRaw()
+		panicIfErr(err)
+		fmt.Println("Got item", uniffi_example.SubscribeItemDebug(*item))
 	}
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// fmt.Println(write)
 }

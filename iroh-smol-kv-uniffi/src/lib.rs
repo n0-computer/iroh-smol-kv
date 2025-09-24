@@ -4,12 +4,11 @@ uniffi::setup_scaffolding!();
 macro_rules! generate_uniffi_support {
     () => {
         mod _uniffi_macro_scope {
-            use std::{collections::HashSet, ops::Bound, pin::Pin, sync::Arc};
+            use std::{collections::HashSet, ops::Bound, pin::Pin, sync::Arc, time::Duration};
 
             use bytes::Bytes;
             use iroh::{PublicKey, SecretKey};
             use iroh_gossip::api::GossipTopic;
-            pub use iroh_smol_kv::Config;
             use iroh_smol_kv::api::{self, Subscribe};
             use n0_future::{Stream, StreamExt};
             use snafu::Snafu;
@@ -196,6 +195,18 @@ macro_rules! generate_uniffi_support {
             #[snafu(module)]
             pub enum PutError {
                 PutFailed { message: String },
+            }
+
+            #[derive(Debug, Snafu, uniffi::Error)]
+            #[snafu(module)]
+            pub enum JoinPeersError {
+                #[snafu(transparent)]
+                Key {
+                    source: PublicKeyError,
+                },
+                Irpc {
+                    message: String,
+                },
             }
 
             #[derive(Debug, Snafu, uniffi::Error)]
@@ -408,12 +419,13 @@ macro_rules! generate_uniffi_support {
             }
 
             #[uniffi::export]
-            pub fn debug_subscribe_item(item: &SubscribeItem) -> String {
+            pub fn subscribe_item_debug(item: &SubscribeItem) -> String {
                 // By reference
                 format!("{:?}", item)
             }
 
             #[derive(uniffi::Object)]
+            #[uniffi::export(Debug)]
             #[allow(clippy::type_complexity)]
             pub struct SubscribeResponse {
                 inner: Mutex<
@@ -426,6 +438,12 @@ macro_rules! generate_uniffi_support {
                         >,
                     >,
                 >,
+            }
+
+            impl std::fmt::Debug for SubscribeResponse {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.debug_struct("SubscribeResponse").finish_non_exhaustive()
+                }
             }
 
             #[uniffi::export]
@@ -444,15 +462,82 @@ macro_rules! generate_uniffi_support {
                 }
             }
 
-            #[derive(uniffi::Object, Debug, Clone)]
+            #[derive(uniffi::Record, Clone)]
+            pub struct Config {
+                pub anti_entropy_interval: Duration,
+                pub fast_anti_entropy_interval: Duration,
+                /// Optional horizon duration. Values older than now - horizon are removed,
+                /// and will not be re-added.
+                pub expiry: Option<ExpiryConfig>,
+            }
+
+            #[uniffi::export]
+            fn new_config() -> Config {
+                iroh_smol_kv::Config::default().into()
+            }
+
+            impl From<iroh_smol_kv::Config> for Config {
+                fn from(c: iroh_smol_kv::Config) -> Self {
+                    Self {
+                        anti_entropy_interval: c.anti_entropy_interval,
+                        fast_anti_entropy_interval: c.fast_anti_entropy_interval,
+                        expiry: c.expiry.map(Into::into),
+                    }
+                }
+            }
+
+            impl From<Config> for iroh_smol_kv::Config {
+                fn from(c: Config) -> Self {
+                    Self {
+                        anti_entropy_interval: c.anti_entropy_interval,
+                        fast_anti_entropy_interval: c.fast_anti_entropy_interval,
+                        expiry: c.expiry.map(Into::into),
+                    }
+                }
+            }
+
+            #[derive(uniffi::Record, Clone)]
+            pub struct ExpiryConfig {
+                /// Duration after which values expire.
+                pub horizon: Duration,
+                /// How often to check for expired values.
+                pub check_interval: Duration,
+            }
+
+            impl From<iroh_smol_kv::ExpiryConfig> for ExpiryConfig {
+                fn from(c: iroh_smol_kv::ExpiryConfig) -> Self {
+                    Self {
+                        horizon: c.horizon,
+                        check_interval: c.check_interval,
+                    }
+                }
+            }
+
+            impl From<ExpiryConfig> for iroh_smol_kv::ExpiryConfig {
+                fn from(c: ExpiryConfig) -> Self {
+                    Self {
+                        horizon: c.horizon,
+                        check_interval: c.check_interval,
+                    }
+                }
+            }
+
+            #[derive(uniffi::Object, Clone)]
+            #[uniffi::export(Debug)]
             pub struct Client {
                 client: api::Client,
+            }
+
+            impl std::fmt::Debug for Client {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.debug_struct("Client").finish_non_exhaustive()
+                }
             }
 
             impl Client {
                 /// This can not be called from uniffi, since we can't make GossipTopic support uniffi.
                 pub fn local(topic: GossipTopic, config: Config) -> Self {
-                    let client = api::Client::local(topic, config);
+                    let client = api::Client::local(topic, config.into());
                     Self { client }
                 }
             }
@@ -507,11 +592,35 @@ macro_rules! generate_uniffi_support {
                         inner: Mutex::new(Box::pin(wrapper)),
                     }))
                 }
+
+                pub async fn join_peers(&self, peers: Vec<Vec<u8>>) -> Result<(), JoinPeersError> {
+                    let peers = peers
+                        .into_iter()
+                        .map(|p| parse_public_key(&p))
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    self.client
+                        .join_peers(peers)
+                        .await
+                        .map_err(|e| JoinPeersError::Irpc {
+                            message: e.to_string(),
+                        })?;
+                    Ok(())
+                }
             }
 
-            #[derive(uniffi::Object, Debug, Clone)]
+            #[derive(uniffi::Object, Clone)]
+            #[uniffi::export(Debug)]
             pub struct WriteScope {
                 write: api::WriteScope,
+            }
+
+            impl std::fmt::Debug for WriteScope {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.debug_struct("WriteScope")
+                        .field("scope", &self.write.scope())
+                        .finish_non_exhaustive()
+                }
             }
 
             #[uniffi::export]

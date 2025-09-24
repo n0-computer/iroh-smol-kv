@@ -346,6 +346,10 @@ pub mod api {
     }
 
     impl WriteScope {
+        pub fn scope(&self) -> PublicKey {
+            self.public
+        }
+
         pub async fn put(
             &self,
             key: impl Into<Bytes>,

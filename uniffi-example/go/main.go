@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"hello-app/uniffi_example"
 	"reflect"
 )
@@ -24,20 +25,20 @@ func panicIfErr(err error) {
 }
 
 func main() {
+	tickets := os.Args[1:];
+	fmt.Println("Starting with tickets", tickets)
 	config := uniffi_example.NewConfig()
-	config.Expiry.Horizon = 10000000000 // 10s
-	config.Expiry.CheckInterval = 5000000000 // 5s
-	db, _ := uniffi_example.NewDb(config)
-	// if err != nil {
-	// 	fmt.Printf("Raw error dump: %#v\n", err)
-	// 	panic(err)
-	// }
+	config.Expiry.Horizon = 10_000_000_000 // 10s
+	config.Expiry.CheckInterval = 5_000_000_000 // 5s
+	fmt.Println("Config created", config)
+	db, err2 := uniffi_example.NewDb(config)
+	panicIfErr(err2)
 	fmt.Println("db created", db.DebugString())
 
 	client := db.Client()
 	fmt.Println("Got client", client.DebugString())
 
-	err := db.JoinPeers([]string{"nodeadn2h4hsdaa42udk2thwkkrwivtlvtxdnqbojyqe6jg7zgxswqea6ajinb2hi4dthixs6zlvmmys2mjoojswyylzfzxdaltjojxwqltjojxwqltmnfxgwlrpaiaakd3g3wykcayaycuab4vquebq"})
+	err := db.JoinPeers(tickets)
 	panicIfErr(err)
 
 	write, err := db.WriteScope()

@@ -15,4 +15,5 @@ generate: build-rust
 	cp ../target/debug/libuniffi_example.dylib go/
 
 run: generate
-	cd go && CGO_LDFLAGS="-L. -luniffi_example" go run main.go
+	cd go && CGO_LDFLAGS="-L. -luniffi_example" go run main.go $(TICKET)
+

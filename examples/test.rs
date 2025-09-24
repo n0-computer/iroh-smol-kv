@@ -4,7 +4,7 @@ use clap::Parser;
 use iroh::{SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
-use iroh_smol_kv::{Config, api};
+use iroh_smol_kv::{Client, Config};
 use n0_future::StreamExt;
 use n0_snafu::ResultExt;
 use tracing::trace;
@@ -51,7 +51,7 @@ async fn main() -> n0_snafu::Result<()> {
     } else {
         gossip.subscribe_and_join(topic, bootstrap_ids).await.e()?
     };
-    let api = api::Client::local(topic, Config::DEBUG);
+    let api = Client::local(topic, Config::DEBUG);
     let ws = api.write(key.clone());
     ws.put("hello", "world").await.e()?;
     let res = api.get(node_id, "hello").await.e()?;

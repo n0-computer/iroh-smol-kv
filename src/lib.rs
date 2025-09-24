@@ -1,7 +1,43 @@
-use std::time::Duration;
+//! A small, gossip-based, eventually consistent key-value store.
+//!
+//! The entry point is the [`Client`] struct, which can be created with a
+//! [`GossipTopic`](iroh_gossip::api::GossipTopic) and a [`Config`].
+//!
+//! Writing to the store requires a [`WriteScope`], which is created
+//! from the client using a [`SecretKey`](iroh::SecretKey).
+//!
+//! You can read from the store with [`Client::get`], but mostly you will
+//! create a subscription using [`Client::subscribe`] and then get updates
+//! of type [`SubscribeItem`].
+//!
+//! Subscriptions can be restricted using a [`Filter`]. You can also specify
+//! if you want just the current state or future updates, using [`SubscribeMode`].
+//!
+//! Entries in the database expire after not being modified for a certain duration,
+//! which can be specified in the [`ExpiryConfig`].
+use std::{
+    collections::HashSet,
+    ops::{Bound, RangeBounds},
+    time::{Duration, SystemTime},
+};
 
-use bytes::Bytes;
-use iroh::PublicKey;
+use bytes::{Bytes, BytesMut};
+use iroh::{NodeId, PublicKey, SecretKey};
+use iroh_gossip::api::{Event, GossipReceiver, GossipSender, GossipTopic};
+use irpc::{
+    channel::{mpsc, oneshot},
+    rpc_requests,
+};
+use n0_future::{FuturesUnordered, StreamExt, TryFutureExt, TryStreamExt, boxed::BoxFuture};
+pub use proto::SignedValue;
+use proto::{GossipMessage, SigningData};
+use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
+use snafu::Snafu;
+use sync_wrapper::SyncStream;
+use tokio::sync::broadcast;
+use tracing::{error, trace};
+use util::{current_timestamp, next_prefix, postcard_ser, to_nanos};
 
 type Entry = (PublicKey, Bytes, SignedValue);
 
@@ -55,787 +91,747 @@ pub mod proto {
     }
 }
 
-use proto::{GossipMessage, SignedValue};
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+#[snafu(module)]
+pub enum InsertError {
+    #[snafu(transparent)]
+    Signature {
+        source: ed25519_dalek::SignatureError,
+    },
+    #[snafu(display("Value too old: existing timestamp {}, new timestamp {}", old, new))]
+    ValueTooOld { old: u64, new: u64 },
+}
 
-pub mod api {
-    //! API to interact with the gossip-based key-value store.
-    use std::{
-        collections::HashSet,
-        ops::{Bound, RangeBounds},
-        time::{Duration, SystemTime},
-    };
+#[derive(Debug, Serialize, Deserialize)]
+struct Put {
+    pub scope: PublicKey,
+    pub key: Bytes,
+    pub value: SignedValue,
+}
 
-    use bytes::{Bytes, BytesMut};
-    use iroh::{NodeId, PublicKey, SecretKey};
-    use iroh_gossip::api::{Event, GossipReceiver, GossipSender, GossipTopic};
-    use irpc::{
-        channel::{mpsc, oneshot},
-        rpc_requests,
-    };
-    use n0_future::{FuturesUnordered, StreamExt, TryFutureExt, TryStreamExt, boxed::BoxFuture};
-    use rand::seq::SliceRandom;
-    use serde::{Deserialize, Serialize};
-    use snafu::Snafu;
-    use sync_wrapper::SyncStream;
-    use tokio::sync::broadcast;
-    use tracing::{error, trace};
+#[derive(Debug, Serialize, Deserialize)]
+struct Get {
+    pub scope: PublicKey,
+    pub key: Bytes,
+}
 
-    pub use crate::proto::SignedValue;
-    use crate::{
-        Config, Entry, GossipMessage,
-        proto::SigningData,
-        util::{current_timestamp, next_prefix, postcard_ser, to_nanos},
-    };
+#[derive(Debug, Serialize, Deserialize)]
+pub enum SubscribeMode {
+    /// Only send current values that match the filter
+    Current,
+    /// Send future values that match the filter
+    Future,
+    /// Send both current and future values that match the filter
+    Both,
+}
 
-    #[derive(Debug, Snafu)]
-    #[snafu(visibility(pub(crate)))]
-    #[snafu(module)]
-    pub enum InsertError {
-        #[snafu(transparent)]
-        Signature {
-            source: ed25519_dalek::SignatureError,
-        },
-        #[snafu(display("Value too old: existing timestamp {}, new timestamp {}", old, new))]
-        ValueTooOld { old: u64, new: u64 },
-    }
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum SubscribeItem {
+    /// A matching entry (scope, key, value)
+    Entry(Entry),
+    /// Marker that all current entries have been sent, and future entries will follow.
+    ///
+    /// You will get at most one CurrentDone message per subscription.
+    CurrentDone,
+    /// An entry that has expired (removed). The u64 is the timestamp when it was last modified.
+    Expired((PublicKey, Bytes, u64)),
+}
 
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Put {
-        pub scope: PublicKey,
-        pub key: Bytes,
-        pub value: SignedValue,
-    }
+#[derive(Clone)]
+pub(crate) enum BroadcastItem {
+    /// A matching entry (scope, key, value)
+    Entry(Entry),
+    /// An entry that has expired (removed)
+    Expired((PublicKey, Bytes, u64)),
+}
 
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Get {
-        pub scope: PublicKey,
-        pub key: Bytes,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub enum SubscribeMode {
-        /// Only send current values that match the filter
-        Current,
-        /// Send future values that match the filter
-        Future,
-        /// Send both current and future values that match the filter
-        Both,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, Clone)]
-    pub enum SubscribeItem {
-        /// A matching entry (scope, key, value)
-        Entry(Entry),
-        /// Marker that all current entries have been sent, and future entries will follow.
-        ///
-        /// You will get at most one CurrentDone message per subscription.
-        CurrentDone,
-        /// An entry that has expired (removed). The u64 is the timestamp when it was last modified.
-        Expired((PublicKey, Bytes, u64)),
-    }
-
-    #[derive(Clone)]
-    pub enum BroadcastItem {
-        /// A matching entry (scope, key, value)
-        Entry(Entry),
-        /// An entry that has expired (removed)
-        Expired((PublicKey, Bytes, u64)),
-    }
-
-    impl From<BroadcastItem> for SubscribeItem {
-        fn from(item: BroadcastItem) -> Self {
-            match item {
-                BroadcastItem::Entry(entry) => SubscribeItem::Entry(entry),
-                BroadcastItem::Expired(entry) => SubscribeItem::Expired(entry),
-            }
+impl From<BroadcastItem> for SubscribeItem {
+    fn from(item: BroadcastItem) -> Self {
+        match item {
+            BroadcastItem::Entry(entry) => SubscribeItem::Entry(entry),
+            BroadcastItem::Expired(entry) => SubscribeItem::Expired(entry),
         }
     }
+}
 
-    impl BroadcastItem {
-        fn contained_in(&self, filter: &crate::api::Filter) -> bool {
-            match self {
-                BroadcastItem::Entry((scope, key, value)) => {
-                    filter.contains(scope, key, value.timestamp)
-                }
-                BroadcastItem::Expired((scope, key, _)) => filter.contains_key(scope, key),
+impl BroadcastItem {
+    fn contained_in(&self, filter: &Filter) -> bool {
+        match self {
+            BroadcastItem::Entry((scope, key, value)) => {
+                filter.contains(scope, key, value.timestamp)
             }
+            BroadcastItem::Expired((scope, key, _)) => filter.contains_key(scope, key),
         }
     }
+}
 
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct Subscribe {
-        pub mode: SubscribeMode,
-        pub filter: Filter,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Subscribe {
+    pub mode: SubscribeMode,
+    pub filter: Filter,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct JoinPeers {
+    pub peers: Vec<NodeId>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[rpc_requests(message = Message)]
+enum Proto {
+    #[rpc(tx = oneshot::Sender<()>)]
+    Put(Put),
+    #[rpc(tx = oneshot::Sender<Option<SignedValue>>)]
+    Get(Get),
+    #[rpc(tx = mpsc::Sender<SubscribeItem>)]
+    Subscribe(Subscribe),
+    #[rpc(tx = oneshot::Sender<()>)]
+    JoinPeers(JoinPeers),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Filter {
+    /// None means no filtering by scope
+    pub scope: Option<HashSet<PublicKey>>,
+    /// Range of keys to include
+    pub key: (Bound<Bytes>, Bound<Bytes>),
+    /// Range of timestamps (in nanoseconds since epoch) to include
+    pub timestamp: (Bound<u64>, Bound<u64>),
+}
+
+impl Filter {
+    pub const ALL: Self = Self {
+        scope: None,
+        key: (Bound::Unbounded, Bound::Unbounded),
+        timestamp: (Bound::Unbounded, Bound::Unbounded),
+    };
+    pub const EMPTY: Self = Self {
+        scope: None,
+        key: (Bound::Unbounded, Bound::Excluded(Bytes::new())),
+        timestamp: (Bound::Unbounded, Bound::Excluded(0)),
+    };
+    /// Sets the scope filter to a single public key.
+    pub fn scope(self, scope: PublicKey) -> Self {
+        self.scopes(Some(scope))
     }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    pub struct JoinPeers {
-        pub peers: Vec<NodeId>,
+    /// Sets the scope filter to a set of public keys.
+    pub fn scopes(self, scope: impl IntoIterator<Item = PublicKey>) -> Self {
+        let scope = scope.into_iter().collect();
+        Self {
+            scope: Some(scope),
+            key: self.key,
+            timestamp: self.timestamp,
+        }
     }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[rpc_requests(message = Message)]
-    enum Proto {
-        #[rpc(tx = oneshot::Sender<()>)]
-        Put(Put),
-        #[rpc(tx = oneshot::Sender<Option<SignedValue>>)]
-        Get(Get),
-        #[rpc(tx = mpsc::Sender<SubscribeItem>)]
-        Subscribe(Subscribe),
-        #[rpc(tx = oneshot::Sender<()>)]
-        JoinPeers(JoinPeers),
+    /// Sets the key filter to a single key.
+    pub fn key(self, key: impl Into<Bytes>) -> Self {
+        let key = key.into();
+        Self {
+            scope: self.scope,
+            key: (Bound::Included(key.clone()), Bound::Included(key)),
+            timestamp: self.timestamp,
+        }
     }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Filter {
-        /// None means no filtering by scope
-        pub scope: Option<HashSet<PublicKey>>,
-        /// Range of keys to include
-        pub key: (Bound<Bytes>, Bound<Bytes>),
-        /// Range of timestamps (in nanoseconds since epoch) to include
-        pub timestamp: (Bound<u64>, Bound<u64>),
+    /// Sets the key filter to a range of keys.
+    pub fn keys<I, V>(self, range: I) -> Self
+    where
+        I: RangeBounds<V>,
+        V: Clone + Into<Bytes>,
+    {
+        let start = range.start_bound().map(|x| x.clone().into());
+        let end = range.end_bound().map(|x| x.clone().into());
+        Self {
+            scope: self.scope,
+            key: (start, end),
+            timestamp: self.timestamp,
+        }
     }
-
-    impl Filter {
-        pub const ALL: Self = Self {
-            scope: None,
-            key: (Bound::Unbounded, Bound::Unbounded),
-            timestamp: (Bound::Unbounded, Bound::Unbounded),
+    /// Sets the key filter to all keys with the given prefix.
+    pub fn key_prefix(self, prefix: impl Into<Bytes>) -> Self {
+        let prefix = prefix.into();
+        let mut end = prefix.to_vec();
+        let start = Bound::Included(prefix);
+        let end = if next_prefix(&mut end) {
+            Bound::Excluded(end.into())
+        } else {
+            Bound::Unbounded
         };
-        pub const EMPTY: Self = Self {
-            scope: None,
-            key: (Bound::Unbounded, Bound::Excluded(Bytes::new())),
-            timestamp: (Bound::Unbounded, Bound::Excluded(0)),
+        Self {
+            scope: self.scope,
+            key: (start, end),
+            timestamp: self.timestamp,
+        }
+    }
+    /// Sets the timestamp filter to a range of system times.
+    pub fn timestamps(self, range: impl RangeBounds<SystemTime>) -> Self {
+        let start = range.start_bound().map(to_nanos);
+        let end = range.end_bound().map(to_nanos);
+        Self {
+            scope: self.scope,
+            key: self.key,
+            timestamp: (start, end),
+        }
+    }
+    /// Checks if the given entry matches the filter.
+    pub fn contains(&self, scope: &PublicKey, key: &[u8], timestamp: u64) -> bool {
+        self.contains_key(scope, key) && self.timestamp.contains(&timestamp)
+    }
+
+    /// Checks if the given scope and key match the filter, excluding timestamp.
+    pub fn contains_key(&self, scope: &PublicKey, key: &[u8]) -> bool {
+        if let Some(scopes) = &self.scope
+            && !scopes.contains(scope)
+        {
+            return false;
+        }
+        self.key.contains(key)
+    }
+}
+
+pub struct IterResult(BoxFuture<Result<mpsc::Receiver<SubscribeItem>, irpc::Error>>);
+
+impl IterResult {
+    pub async fn collect<C: Default + Extend<(PublicKey, Bytes, Bytes)>>(
+        self,
+    ) -> Result<C, irpc::Error> {
+        let mut rx = self.0.await?;
+        let mut items = C::default();
+        while let Some(SubscribeItem::Entry((scope, key, value))) = rx.recv().await? {
+            items.extend(Some((scope, key, value.value)));
+        }
+        Ok(items)
+    }
+}
+
+pub struct SubscribeResult(BoxFuture<Result<mpsc::Receiver<SubscribeItem>, irpc::Error>>);
+
+impl SubscribeResult {
+    /// Stream of entries from the subscription, as raw SubscribeResponse values.
+    pub fn stream_raw(
+        self,
+    ) -> impl n0_future::Stream<Item = Result<SubscribeItem, irpc::Error>> + Send + Sync + 'static
+    {
+        SyncStream::new(
+            async move {
+                let rx = self.0.await?;
+                Ok(rx.into_stream().map_err(irpc::Error::from))
+            }
+            .try_flatten_stream(),
+        )
+    }
+
+    /// Stream of entries from the subscription, without distinguishing current vs future.
+    pub fn stream(
+        self,
+    ) -> impl n0_future::Stream<Item = Result<Entry, irpc::Error>> + Send + Sync + 'static {
+        SyncStream::new(
+            async move {
+                let rx = self.0.await?;
+                Ok(rx
+                    .into_stream()
+                    .try_filter_map(|res| async move {
+                        match res {
+                            SubscribeItem::Entry(entry) => Ok(Some(entry)),
+                            SubscribeItem::Expired((_, _, _)) => Ok(None),
+                            SubscribeItem::CurrentDone => Ok(None),
+                        }
+                    })
+                    .map_err(irpc::Error::from))
+            }
+            .try_flatten_stream(),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Client(irpc::Client<Proto>);
+
+#[derive(Debug, Clone)]
+pub struct WriteScope {
+    api: Client,
+    secret: SecretKey,
+    public: PublicKey,
+}
+
+impl WriteScope {
+    pub fn scope(&self) -> PublicKey {
+        self.public
+    }
+
+    pub async fn put(
+        &self,
+        key: impl Into<Bytes>,
+        value: impl Into<Bytes>,
+    ) -> Result<(), irpc::Error> {
+        let key = key.into();
+        let value = value.into();
+        let timestamp = current_timestamp();
+        let signing_data = SigningData {
+            key: &key,
+            timestamp,
+            value: &value,
         };
-        /// Sets the scope filter to a single public key.
-        pub fn scope(self, scope: PublicKey) -> Self {
-            self.scopes(Some(scope))
-        }
-        /// Sets the scope filter to a set of public keys.
-        pub fn scopes(self, scope: impl IntoIterator<Item = PublicKey>) -> Self {
-            let scope = scope.into_iter().collect();
-            Self {
-                scope: Some(scope),
-                key: self.key,
-                timestamp: self.timestamp,
-            }
-        }
-        /// Sets the key filter to a single key.
-        pub fn key(self, key: impl Into<Bytes>) -> Self {
-            let key = key.into();
-            Self {
-                scope: self.scope,
-                key: (Bound::Included(key.clone()), Bound::Included(key)),
-                timestamp: self.timestamp,
-            }
-        }
-        /// Sets the key filter to a range of keys.
-        pub fn keys<I, V>(self, range: I) -> Self
-        where
-            I: RangeBounds<V>,
-            V: Clone + Into<Bytes>,
-        {
-            let start = range.start_bound().map(|x| x.clone().into());
-            let end = range.end_bound().map(|x| x.clone().into());
-            Self {
-                scope: self.scope,
-                key: (start, end),
-                timestamp: self.timestamp,
-            }
-        }
-        /// Sets the key filter to all keys with the given prefix.
-        pub fn key_prefix(self, prefix: impl Into<Bytes>) -> Self {
-            let prefix = prefix.into();
-            let mut end = prefix.to_vec();
-            let start = Bound::Included(prefix);
-            let end = if next_prefix(&mut end) {
-                Bound::Excluded(end.into())
-            } else {
-                Bound::Unbounded
-            };
-            Self {
-                scope: self.scope,
-                key: (start, end),
-                timestamp: self.timestamp,
-            }
-        }
-        /// Sets the timestamp filter to a range of system times.
-        pub fn timestamps(self, range: impl RangeBounds<SystemTime>) -> Self {
-            let start = range.start_bound().map(to_nanos);
-            let end = range.end_bound().map(to_nanos);
-            Self {
-                scope: self.scope,
-                key: self.key,
-                timestamp: (start, end),
-            }
-        }
-        /// Checks if the given entry matches the filter.
-        pub fn contains(&self, scope: &PublicKey, key: &[u8], timestamp: u64) -> bool {
-            self.contains_key(scope, key) && self.timestamp.contains(&timestamp)
-        }
+        let signing_data_bytes = postcard::to_stdvec(&signing_data).expect("signing data to vec");
+        let signature = self.secret.sign(&signing_data_bytes);
+        let signed_value = SignedValue {
+            timestamp,
+            value: value.clone(),
+            signature: signature.to_bytes(),
+        };
+        self.api.put(self.public, key, signed_value).await
+    }
+}
 
-        /// Checks if the given scope and key match the filter, excluding timestamp.
-        pub fn contains_key(&self, scope: &PublicKey, key: &[u8]) -> bool {
-            if let Some(scopes) = &self.scope
-                && !scopes.contains(scope)
-            {
-                return false;
-            }
-            self.key.contains(key)
+impl Client {
+    /// Create a local client. This requires a tokio runtime.
+    pub fn local(topic: GossipTopic, config: Config) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let actor = Actor::new(topic, rx, config);
+        tokio::spawn(actor.run());
+        Self(tx.into())
+    }
+
+    /// This isn't public because it does not verify the signature on the value.
+    async fn put(
+        &self,
+        scope: PublicKey,
+        key: Bytes,
+        value: SignedValue,
+    ) -> Result<(), irpc::Error> {
+        self.0.rpc(Put { scope, key, value }).await
+    }
+
+    /// Create a write scope that can put values signed by the given secret key.
+    pub fn write(&self, secret: SecretKey) -> WriteScope {
+        WriteScope {
+            api: self.clone(),
+            public: secret.public(),
+            secret,
         }
     }
 
-    pub struct IterResult(BoxFuture<Result<mpsc::Receiver<SubscribeItem>, irpc::Error>>);
-
-    impl IterResult {
-        pub async fn collect<C: Default + Extend<(PublicKey, Bytes, Bytes)>>(
-            self,
-        ) -> Result<C, irpc::Error> {
-            let mut rx = self.0.await?;
-            let mut items = C::default();
-            while let Some(SubscribeItem::Entry((scope, key, value))) = rx.recv().await? {
-                items.extend(Some((scope, key, value.value)));
-            }
-            Ok(items)
-        }
-    }
-
-    pub struct SubscribeResult(BoxFuture<Result<mpsc::Receiver<SubscribeItem>, irpc::Error>>);
-
-    impl SubscribeResult {
-        /// Stream of entries from the subscription, as raw SubscribeResponse values.
-        pub fn stream_raw(
-            self,
-        ) -> impl n0_future::Stream<Item = Result<SubscribeItem, irpc::Error>> + Send + Sync + 'static
-        {
-            SyncStream::new(
-                async move {
-                    let rx = self.0.await?;
-                    Ok(rx.into_stream().map_err(irpc::Error::from))
-                }
-                .try_flatten_stream(),
-            )
-        }
-
-        /// Stream of entries from the subscription, without distinguishing current vs future.
-        pub fn stream(
-            self,
-        ) -> impl n0_future::Stream<Item = Result<Entry, irpc::Error>> + Send + Sync + 'static
-        {
-            SyncStream::new(
-                async move {
-                    let rx = self.0.await?;
-                    Ok(rx
-                        .into_stream()
-                        .try_filter_map(|res| async move {
-                            match res {
-                                SubscribeItem::Entry(entry) => Ok(Some(entry)),
-                                SubscribeItem::Expired((_, _, _)) => Ok(None),
-                                SubscribeItem::CurrentDone => Ok(None),
-                            }
-                        })
-                        .map_err(irpc::Error::from))
-                }
-                .try_flatten_stream(),
-            )
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct Client(irpc::Client<Proto>);
-
-    #[derive(Debug, Clone)]
-    pub struct WriteScope {
-        api: Client,
-        secret: SecretKey,
-        public: PublicKey,
-    }
-
-    impl WriteScope {
-        pub fn scope(&self) -> PublicKey {
-            self.public
-        }
-
-        pub async fn put(
-            &self,
-            key: impl Into<Bytes>,
-            value: impl Into<Bytes>,
-        ) -> Result<(), irpc::Error> {
-            let key = key.into();
-            let value = value.into();
-            let timestamp = current_timestamp();
-            let signing_data = SigningData {
-                key: &key,
-                timestamp,
-                value: &value,
-            };
-            let signing_data_bytes =
-                postcard::to_stdvec(&signing_data).expect("signing data to vec");
-            let signature = self.secret.sign(&signing_data_bytes);
-            let signed_value = SignedValue {
-                timestamp,
-                value: value.clone(),
-                signature: signature.to_bytes(),
-            };
-            self.api.put(self.public, key, signed_value).await
-        }
-    }
-
-    impl Client {
-        pub fn local(topic: GossipTopic, config: Config) -> Self {
-            let (tx, rx) = tokio::sync::mpsc::channel(32);
-            let actor = Actor::new(topic, rx, config);
-            tokio::spawn(actor.run());
-            Self(tx.into())
-        }
-
-        /// This isn't public because it does not verify the signature on the value.
-        async fn put(
-            &self,
-            scope: PublicKey,
-            key: Bytes,
-            value: SignedValue,
-        ) -> Result<(), irpc::Error> {
-            self.0.rpc(Put { scope, key, value }).await
-        }
-
-        /// Create a write scope that can put values signed by the given secret key.
-        pub fn write(&self, secret: SecretKey) -> WriteScope {
-            WriteScope {
-                api: self.clone(),
-                public: secret.public(),
-                secret,
-            }
-        }
-
-        pub async fn get(
-            &self,
-            scope: PublicKey,
-            key: impl Into<Bytes>,
-        ) -> Result<Option<Bytes>, irpc::Error> {
-            let value = self
-                .0
-                .rpc(Get {
-                    scope,
-                    key: key.into(),
-                })
-                .await?;
-            Ok(value.map(|sv| sv.value))
-        }
-
-        pub fn subscribe(&self) -> SubscribeResult {
-            self.subscribe_with_opts(Subscribe {
-                mode: SubscribeMode::Both,
-                filter: Filter::ALL,
+    pub async fn get(
+        &self,
+        scope: PublicKey,
+        key: impl Into<Bytes>,
+    ) -> Result<Option<Bytes>, irpc::Error> {
+        let value = self
+            .0
+            .rpc(Get {
+                scope,
+                key: key.into(),
             })
-        }
-
-        pub fn subscribe_with_opts(&self, subscribe: Subscribe) -> SubscribeResult {
-            SubscribeResult(Box::pin(self.0.server_streaming(subscribe, 32)))
-        }
-
-        pub fn iter_with_opts(&self, filter: Filter) -> IterResult {
-            let subscribe = Subscribe {
-                mode: SubscribeMode::Current,
-                filter,
-            };
-            IterResult(Box::pin(self.0.server_streaming(subscribe, 32)))
-        }
-
-        pub fn iter(&self) -> IterResult {
-            let subscribe = Subscribe {
-                mode: SubscribeMode::Current,
-                filter: Filter::ALL,
-            };
-            IterResult(Box::pin(self.0.server_streaming(subscribe, 32)))
-        }
-
-        pub fn join_peers(
-            &self,
-            peers: impl IntoIterator<Item = NodeId>,
-        ) -> impl n0_future::Future<Output = Result<(), irpc::Error>> {
-            let peers = JoinPeers {
-                peers: peers.into_iter().collect(),
-            };
-            self.0.rpc(peers)
-        }
+            .await?;
+        Ok(value.map(|sv| sv.value))
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-    struct State {
-        current: rpds::HashTrieMapSync<PublicKey, rpds::RedBlackTreeMapSync<Bytes, SignedValue>>,
+    pub fn subscribe(&self) -> SubscribeResult {
+        self.subscribe_with_opts(Subscribe {
+            mode: SubscribeMode::Both,
+            filter: Filter::ALL,
+        })
     }
 
-    impl State {
-        fn new() -> Self {
-            Self::default()
-        }
+    pub fn subscribe_with_opts(&self, subscribe: Subscribe) -> SubscribeResult {
+        SubscribeResult(Box::pin(self.0.server_streaming(subscribe, 32)))
+    }
 
-        fn snapshot(&self) -> Self {
-            self.clone()
-        }
+    pub fn iter_with_opts(&self, filter: Filter) -> IterResult {
+        let subscribe = Subscribe {
+            mode: SubscribeMode::Current,
+            filter,
+        };
+        IterResult(Box::pin(self.0.server_streaming(subscribe, 32)))
+    }
 
-        fn insert_signed_value(
-            &mut self,
-            scope: PublicKey,
-            key: Bytes,
-            value: SignedValue,
-        ) -> Result<(), InsertError> {
-            let signing_data = SigningData {
-                key: &key,
-                timestamp: value.timestamp,
-                value: &value.value,
-            };
-            let signing_data_bytes =
-                postcard::to_stdvec(&signing_data).expect("signing data to vec");
-            let signature = ed25519_dalek::Signature::from_bytes(&value.signature);
-            scope.verify(&signing_data_bytes, &signature)?;
-            self.insert_signed_value_unverified(scope, key, value)
-        }
+    pub fn iter(&self) -> IterResult {
+        let subscribe = Subscribe {
+            mode: SubscribeMode::Current,
+            filter: Filter::ALL,
+        };
+        IterResult(Box::pin(self.0.server_streaming(subscribe, 32)))
+    }
 
-        fn insert_signed_value_unverified(
-            &mut self,
-            scope: PublicKey,
-            key: Bytes,
-            value: SignedValue,
-        ) -> Result<(), InsertError> {
-            let per_node = if let Some(current) = self.current.get_mut(&scope) {
-                current
-            } else {
-                self.current.insert_mut(scope, Default::default());
-                self.current.get_mut(&scope).expect("just inserted")
-            };
-            match per_node.get_mut(&key) {
-                Some(existing) if existing.timestamp >= value.timestamp => {
-                    return Err(insert_error::ValueTooOldSnafu {
-                        old: existing.timestamp,
-                        new: value.timestamp,
-                    }
-                    .build());
+    pub fn join_peers(
+        &self,
+        peers: impl IntoIterator<Item = NodeId>,
+    ) -> impl n0_future::Future<Output = Result<(), irpc::Error>> {
+        let peers = JoinPeers {
+            peers: peers.into_iter().collect(),
+        };
+        self.0.rpc(peers)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct State {
+    current: rpds::HashTrieMapSync<PublicKey, rpds::RedBlackTreeMapSync<Bytes, SignedValue>>,
+}
+
+impl State {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn snapshot(&self) -> Self {
+        self.clone()
+    }
+
+    fn insert_signed_value(
+        &mut self,
+        scope: PublicKey,
+        key: Bytes,
+        value: SignedValue,
+    ) -> Result<(), InsertError> {
+        let signing_data = SigningData {
+            key: &key,
+            timestamp: value.timestamp,
+            value: &value.value,
+        };
+        let signing_data_bytes = postcard::to_stdvec(&signing_data).expect("signing data to vec");
+        let signature = ed25519_dalek::Signature::from_bytes(&value.signature);
+        scope.verify(&signing_data_bytes, &signature)?;
+        self.insert_signed_value_unverified(scope, key, value)
+    }
+
+    fn insert_signed_value_unverified(
+        &mut self,
+        scope: PublicKey,
+        key: Bytes,
+        value: SignedValue,
+    ) -> Result<(), InsertError> {
+        let per_node = if let Some(current) = self.current.get_mut(&scope) {
+            current
+        } else {
+            self.current.insert_mut(scope, Default::default());
+            self.current.get_mut(&scope).expect("just inserted")
+        };
+        match per_node.get_mut(&key) {
+            Some(existing) if existing.timestamp >= value.timestamp => {
+                return Err(insert_error::ValueTooOldSnafu {
+                    old: existing.timestamp,
+                    new: value.timestamp,
                 }
-                _ => {
-                    per_node.insert_mut(key, value);
-                }
+                .build());
             }
-            Ok(())
+            _ => {
+                per_node.insert_mut(key, value);
+            }
         }
+        Ok(())
+    }
 
-        fn get(&self, scope: &PublicKey, key: &Bytes) -> Option<&SignedValue> {
-            self.current.get(scope).and_then(|m| m.get(key))
-        }
+    fn get(&self, scope: &PublicKey, key: &Bytes) -> Option<&SignedValue> {
+        self.current.get(scope).and_then(|m| m.get(key))
+    }
 
-        fn flatten_filtered(
-            &self,
-            filter: &Filter,
-        ) -> impl Iterator<Item = (&PublicKey, &Bytes, &SignedValue)> {
-            // first filter by scope using a full scan
-            let filtered_by_scope = self.current.iter().filter(|(scope, _)| {
-                filter
-                    .scope
-                    .as_ref()
-                    .map(|scopes| scopes.contains(*scope))
-                    .unwrap_or(true)
-            });
-            filtered_by_scope.flat_map(move |(scope, map)| {
-                // filter by key range using the tree structure
-                let filtered_by_key =
-                    map.range(filter.key.clone())
-                        .filter(move |(_, signed_value)| {
-                            filter.timestamp.contains(&signed_value.timestamp)
-                        });
-                // filter by timestamp using a full scan of the remaining items
-                let filtered_by_timestamp = filtered_by_key.filter(move |(_, signed_value)| {
+    fn flatten_filtered(
+        &self,
+        filter: &Filter,
+    ) -> impl Iterator<Item = (&PublicKey, &Bytes, &SignedValue)> {
+        // first filter by scope using a full scan
+        let filtered_by_scope = self.current.iter().filter(|(scope, _)| {
+            filter
+                .scope
+                .as_ref()
+                .map(|scopes| scopes.contains(*scope))
+                .unwrap_or(true)
+        });
+        filtered_by_scope.flat_map(move |(scope, map)| {
+            // filter by key range using the tree structure
+            let filtered_by_key = map
+                .range(filter.key.clone())
+                .filter(move |(_, signed_value)| {
                     filter.timestamp.contains(&signed_value.timestamp)
                 });
-                // add the scope
-                filtered_by_timestamp.map(move |(key, signed_value)| (scope, key, signed_value))
-            })
-        }
+            // filter by timestamp using a full scan of the remaining items
+            let filtered_by_timestamp = filtered_by_key.filter(move |(_, signed_value)| {
+                filter.timestamp.contains(&signed_value.timestamp)
+            });
+            // add the scope
+            filtered_by_timestamp.map(move |(key, signed_value)| (scope, key, signed_value))
+        })
+    }
 
-        fn flatten(&self) -> impl Iterator<Item = (&PublicKey, &Bytes, &SignedValue)> {
-            self.current.iter().flat_map(|(scope, map)| {
-                map.iter()
-                    .map(move |(key, signed_value)| (scope, key, signed_value))
-            })
+    fn flatten(&self) -> impl Iterator<Item = (&PublicKey, &Bytes, &SignedValue)> {
+        self.current.iter().flat_map(|(scope, map)| {
+            map.iter()
+                .map(move |(key, signed_value)| (scope, key, signed_value))
+        })
+    }
+}
+
+struct Actor {
+    sender: GossipSender,
+    receiver: GossipReceiver,
+    rx: tokio::sync::mpsc::Receiver<Message>,
+    config: Config,
+    state: State,
+    broadcast_tx: broadcast::Sender<BroadcastItem>,
+}
+
+impl Actor {
+    fn new(topic: GossipTopic, rx: tokio::sync::mpsc::Receiver<Message>, config: Config) -> Self {
+        let (sender, receiver) = topic.split();
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(32);
+        Self {
+            state: State::new(),
+            sender,
+            receiver,
+            rx,
+            broadcast_tx,
+            config,
         }
     }
 
-    struct Actor {
+    fn horizon(&self) -> Option<u64> {
+        self.config
+            .expiry
+            .as_ref()
+            .map(|d| current_timestamp() - d.horizon.as_nanos() as u64)
+    }
+
+    fn apply_horizon(&mut self) -> Vec<(PublicKey, Bytes, u64)> {
+        let mut expired = Vec::new();
+        let Some(horizon) = self.horizon() else {
+            return expired;
+        };
+        for (scope, map) in self.state.current.iter() {
+            for (key, value) in map.iter() {
+                if value.timestamp < horizon {
+                    expired.push((*scope, key.clone(), value.timestamp));
+                }
+            }
+        }
+        let mut expired_scopes = HashSet::new();
+        for (scope, key, _) in &expired {
+            let entry = self.state.current.get_mut(scope).expect("just checked");
+            entry.remove_mut(key);
+            if entry.is_empty() {
+                expired_scopes.insert(*scope);
+            }
+        }
+        for scope in expired_scopes {
+            self.state.current.remove_mut(&scope);
+        }
+        expired
+    }
+
+    /// Publish all known values in random order over the gossip network, spaced out evenly over the given total duration.
+    async fn anti_entropy(
+        snapshot: State,
         sender: GossipSender,
-        receiver: GossipReceiver,
-        rx: tokio::sync::mpsc::Receiver<Message>,
-        config: Config,
-        state: State,
-        broadcast_tx: broadcast::Sender<BroadcastItem>,
+        total: Duration,
+    ) -> Result<(), iroh_gossip::api::ApiError> {
+        trace!(
+            "Starting anti-entropy with {} items for {:?}",
+            snapshot.flatten().count(),
+            total
+        );
+        let mut rng = rand::rngs::OsRng;
+        let mut to_publish = snapshot.flatten().collect::<Vec<_>>();
+        to_publish.shuffle(&mut rng);
+        let n = to_publish.len();
+        if n == 0 {
+            tokio::time::sleep(total).await;
+            return Ok(());
+        }
+        let delay = total / (n as u32);
+        let mut buf = BytesMut::with_capacity(4096);
+        for (scope, key, signed_value) in to_publish {
+            let gossip_msg = GossipMessage::SignedValue(*scope, key.clone(), signed_value.clone());
+            let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
+            trace!(
+                "Anti-entropy publishing key={:?} at={:?}",
+                key,
+                signed_value.timestamp / 1_000_000_000
+            );
+            sender.broadcast_neighbors(gossip_msg).await?;
+            tokio::time::sleep(delay).await;
+        }
+        Ok(())
     }
 
-    impl Actor {
-        fn new(
-            topic: GossipTopic,
-            rx: tokio::sync::mpsc::Receiver<Message>,
-            config: Config,
-        ) -> Self {
-            let (sender, receiver) = topic.split();
-            let (broadcast_tx, _) = tokio::sync::broadcast::channel(32);
-            Self {
-                state: State::new(),
-                sender,
-                receiver,
-                rx,
-                broadcast_tx,
-                config,
-            }
+    async fn iter_current(
+        tx: &irpc::channel::mpsc::Sender<SubscribeItem>,
+        snapshot: &State,
+        filter: &Filter,
+    ) -> Result<(), irpc::Error> {
+        for (scope, key, signed_value) in snapshot.flatten_filtered(filter) {
+            tx.send(SubscribeItem::Entry((
+                *scope,
+                key.clone(),
+                signed_value.clone(),
+            )))
+            .await?;
         }
+        Ok(())
+    }
 
-        fn horizon(&self) -> Option<u64> {
-            self.config
-                .expiry
-                .as_ref()
-                .map(|d| current_timestamp() - d.horizon.as_nanos() as u64)
+    async fn handle_subscribe(
+        tx: mpsc::Sender<SubscribeItem>,
+        filter: Filter,
+        current: Option<State>,
+        future: Option<tokio::sync::broadcast::Receiver<BroadcastItem>>,
+    ) {
+        if let Some(snapshot) = current
+            && Self::iter_current(&tx, &snapshot, &filter).await.is_err()
+        {
+            return;
         }
-
-        fn apply_horizon(&mut self) -> Vec<(PublicKey, Bytes, u64)> {
-            let mut expired = Vec::new();
-            let Some(horizon) = self.horizon() else {
-                return expired;
-            };
-            for (scope, map) in self.state.current.iter() {
-                for (key, value) in map.iter() {
-                    if value.timestamp < horizon {
-                        expired.push((*scope, key.clone(), value.timestamp));
+        let Some(mut broadcast_rx) = future else {
+            return;
+        };
+        // Indicate that current values are done, and we are now sending future values.
+        if tx.send(SubscribeItem::CurrentDone).await.is_err() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                item = broadcast_rx.recv() => {
+                    let Ok(item) = item else {
+                        break;
+                    };
+                    if !item.contained_in(&filter) {
+                        continue;
                     }
-                }
-            }
-            let mut expired_scopes = HashSet::new();
-            for (scope, key, _) in &expired {
-                let entry = self.state.current.get_mut(scope).expect("just checked");
-                entry.remove_mut(key);
-                if entry.is_empty() {
-                    expired_scopes.insert(*scope);
-                }
-            }
-            for scope in expired_scopes {
-                self.state.current.remove_mut(&scope);
-            }
-            expired
-        }
-
-        /// Publish all known values in random order over the gossip network, spaced out evenly over the given total duration.
-        async fn anti_entropy(
-            snapshot: State,
-            sender: GossipSender,
-            total: Duration,
-        ) -> Result<(), iroh_gossip::api::ApiError> {
-            trace!(
-                "Starting anti-entropy with {} items for {:?}",
-                snapshot.flatten().count(),
-                total
-            );
-            let mut rng = rand::rngs::OsRng;
-            let mut to_publish = snapshot.flatten().collect::<Vec<_>>();
-            to_publish.shuffle(&mut rng);
-            let n = to_publish.len();
-            if n == 0 {
-                tokio::time::sleep(total).await;
-                return Ok(());
-            }
-            let delay = total / (n as u32);
-            let mut buf = BytesMut::with_capacity(4096);
-            for (scope, key, signed_value) in to_publish {
-                let gossip_msg =
-                    GossipMessage::SignedValue(*scope, key.clone(), signed_value.clone());
-                let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
-                trace!(
-                    "Anti-entropy publishing key={:?} at={:?}",
-                    key,
-                    signed_value.timestamp / 1_000_000_000
-                );
-                sender.broadcast_neighbors(gossip_msg).await?;
-                tokio::time::sleep(delay).await;
-            }
-            Ok(())
-        }
-
-        async fn iter_current(
-            tx: &irpc::channel::mpsc::Sender<SubscribeItem>,
-            snapshot: &State,
-            filter: &Filter,
-        ) -> Result<(), irpc::Error> {
-            for (scope, key, signed_value) in snapshot.flatten_filtered(filter) {
-                tx.send(SubscribeItem::Entry((
-                    *scope,
-                    key.clone(),
-                    signed_value.clone(),
-                )))
-                .await?;
-            }
-            Ok(())
-        }
-
-        async fn handle_subscribe(
-            tx: mpsc::Sender<SubscribeItem>,
-            filter: Filter,
-            current: Option<State>,
-            future: Option<tokio::sync::broadcast::Receiver<BroadcastItem>>,
-        ) {
-            if let Some(snapshot) = current
-                && Self::iter_current(&tx, &snapshot, &filter).await.is_err()
-            {
-                return;
-            }
-            let Some(mut broadcast_rx) = future else {
-                return;
-            };
-            // Indicate that current values are done, and we are now sending future values.
-            if tx.send(SubscribeItem::CurrentDone).await.is_err() {
-                return;
-            }
-            loop {
-                tokio::select! {
-                    item = broadcast_rx.recv() => {
-                        let Ok(item) = item else {
-                            break;
-                        };
-                        if !item.contained_in(&filter) {
-                            continue;
-                        }
-                        if tx.send(item.into()).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ = tx.closed() => {
+                    if tx.send(item.into()).await.is_err() {
                         break;
                     }
                 }
+                _ = tx.closed() => {
+                    break;
+                }
             }
         }
+    }
 
-        async fn run(mut self) {
-            let mut tasks = FuturesUnordered::<n0_future::boxed::BoxFuture<()>>::new();
-            let mut buf = bytes::BytesMut::with_capacity(4096);
-            let anti_entropy = Self::anti_entropy(
-                self.state.snapshot(),
-                self.sender.clone(),
-                self.config.anti_entropy_interval,
-            );
-            let horizon_period = match self.horizon() {
-                Some(_) => Duration::from_secs(30),
-                None => Duration::MAX,
-            };
-            let apply_horizon = Box::pin(tokio::time::sleep(horizon_period));
-            tokio::pin!(anti_entropy, apply_horizon);
-            loop {
-                tokio::select! {
-                    msg = self.rx.recv() => {
-                        trace!("Received local message {:?}", msg);
-                        let Some(msg) = msg else {
-                            break;
-                        };
-                        match msg {
-                            Message::Put(msg) => {
-                                self.state.insert_signed_value_unverified(msg.scope, msg.key.clone(), msg.value.clone())
-                                    .expect("inserting local value should always work");
-                                let gossip_msg = GossipMessage::SignedValue(msg.scope, msg.key.clone(), msg.value.clone());
-                                let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
-                                self.sender.broadcast(gossip_msg).await.ok();
-                                self.broadcast_tx.send(BroadcastItem::Entry((msg.scope, msg.key.clone(), msg.value.clone()))).ok();
-                                msg.tx.send(()).await.ok();
-                            }
-                            Message::Get(msg) => {
-                                let res = self.state.get(&msg.scope, &msg.key);
-                                msg.tx.send(res.cloned()).await.ok();
-                            }
-                            Message::Subscribe(msg) => {
-                                let broadcast_rx = self.broadcast_tx.subscribe();
-                                let filter = msg.filter.clone();
-                                let (current, future) = match msg.mode {
-                                    SubscribeMode::Current => (Some(self.state.snapshot()), None),
-                                    SubscribeMode::Future => (None, Some(broadcast_rx)),
-                                    SubscribeMode::Both => (Some(self.state.snapshot()), Some(broadcast_rx)),
-                                };
-                                tasks.push(Box::pin(Self::handle_subscribe(msg.tx, filter, current, future)));
-                            }
-                            Message::JoinPeers(msg) => {
-                                let res = self.sender.join_peers(msg.peers.clone()).await;
-                                msg.tx.send(()).await.ok();
-                                if let Err(e) = res {
-                                    error!("Error joining peers: {:?}", e);
-                                    break;
-                                }
-                            }
+    async fn run(mut self) {
+        let mut tasks = FuturesUnordered::<n0_future::boxed::BoxFuture<()>>::new();
+        let mut buf = bytes::BytesMut::with_capacity(4096);
+        let anti_entropy = Self::anti_entropy(
+            self.state.snapshot(),
+            self.sender.clone(),
+            self.config.anti_entropy_interval,
+        );
+        let horizon_period = match self.horizon() {
+            Some(_) => Duration::from_secs(30),
+            None => Duration::MAX,
+        };
+        let apply_horizon = Box::pin(tokio::time::sleep(horizon_period));
+        tokio::pin!(anti_entropy, apply_horizon);
+        loop {
+            tokio::select! {
+                msg = self.rx.recv() => {
+                    trace!("Received local message {:?}", msg);
+                    let Some(msg) = msg else {
+                        break;
+                    };
+                    match msg {
+                        Message::Put(msg) => {
+                            self.state.insert_signed_value_unverified(msg.scope, msg.key.clone(), msg.value.clone())
+                                .expect("inserting local value should always work");
+                            let gossip_msg = GossipMessage::SignedValue(msg.scope, msg.key.clone(), msg.value.clone());
+                            let gossip_msg = postcard_ser(&gossip_msg, &mut buf);
+                            self.sender.broadcast(gossip_msg).await.ok();
+                            self.broadcast_tx.send(BroadcastItem::Entry((msg.scope, msg.key.clone(), msg.value.clone()))).ok();
+                            msg.tx.send(()).await.ok();
                         }
-                    }
-                    msg = self.receiver.next() => {
-                        trace!("Received gossip message {:?}", msg);
-                        let Some(msg) = msg else {
-                            error!("Gossip receiver closed");
-                            break;
-                        };
-                        let msg = match msg {
-                            Ok(msg) => msg,
-                            Err(cause) => {
-                                error!("Error receiving message: {:?}", cause);
+                        Message::Get(msg) => {
+                            let res = self.state.get(&msg.scope, &msg.key);
+                            msg.tx.send(res.cloned()).await.ok();
+                        }
+                        Message::Subscribe(msg) => {
+                            let broadcast_rx = self.broadcast_tx.subscribe();
+                            let filter = msg.filter.clone();
+                            let (current, future) = match msg.mode {
+                                SubscribeMode::Current => (Some(self.state.snapshot()), None),
+                                SubscribeMode::Future => (None, Some(broadcast_rx)),
+                                SubscribeMode::Both => (Some(self.state.snapshot()), Some(broadcast_rx)),
+                            };
+                            tasks.push(Box::pin(Self::handle_subscribe(msg.tx, filter, current, future)));
+                        }
+                        Message::JoinPeers(msg) => {
+                            let res = self.sender.join_peers(msg.peers.clone()).await;
+                            msg.tx.send(()).await.ok();
+                            if let Err(e) = res {
+                                error!("Error joining peers: {:?}", e);
                                 break;
                             }
-                        };
-                        let msg = match msg {
-                            Event::Received(msg) => msg,
-                            Event::NeighborUp(peer) => {
-                                trace!("New peer {}, starting fast anti-entropy", peer.fmt_short());
-                                anti_entropy.set(Self::anti_entropy(self.state.snapshot(), self.sender.clone(), self.config.fast_anti_entropy_interval));
-                                continue;
-                            },
-                            Event::NeighborDown(peer) => {
-                                trace!("Peer down: {}, goodbye!", peer.fmt_short());
-                                continue;
-                            },
-                            e => {
-                                trace!("Ignoring event: {:?}", e);
-                                continue
-                            },
-                        };
-                        let msg = match postcard::from_bytes::<GossipMessage>(&msg.content) {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                trace!("Error deserializing gossip message: {:?}", e);
-                                continue;
-                            }
-                        };
-                        match msg {
-                            GossipMessage::SignedValue(scope, key, value) => {
-                                if let Some(horizon) = self.horizon()
-                                    && value.timestamp < horizon {
-                                        trace!("Ignoring value key={:?} epoch={} below horizon", key, value.timestamp);
-                                        continue;
-                                    }
-                                let id = scope.fmt_short();
-                                trace!(%id, "Received signed value key={:?} epoch={}", key, value.timestamp);
-                                let Ok(_) = self.state.insert_signed_value(scope, key.clone(), value.clone()) else {
-                                    continue;
-                                };
-                                trace!(%id, "Broadcasting internally");
-                                self.broadcast_tx.send(BroadcastItem::Entry((scope, key, value))).ok();
-                            }
                         }
                     }
-                    res = &mut anti_entropy => {
-                        if let Err(e) = res {
-                            error!("Error in anti-entropy: {:?}", e);
+                }
+                msg = self.receiver.next() => {
+                    trace!("Received gossip message {:?}", msg);
+                    let Some(msg) = msg else {
+                        error!("Gossip receiver closed");
+                        break;
+                    };
+                    let msg = match msg {
+                        Ok(msg) => msg,
+                        Err(cause) => {
+                            error!("Error receiving message: {:?}", cause);
                             break;
                         }
-                        // anti-entropy finished, start a new one
-                        anti_entropy.set(Self::anti_entropy(self.state.snapshot(), self.sender.clone(), self.config.anti_entropy_interval));
-                    }
-                    _ = &mut apply_horizon => {
-                        let expired = self.apply_horizon();
-                        for entry in expired {
-                            self.broadcast_tx.send(BroadcastItem::Expired(entry)).ok();
+                    };
+                    let msg = match msg {
+                        Event::Received(msg) => msg,
+                        Event::NeighborUp(peer) => {
+                            trace!("New peer {}, starting fast anti-entropy", peer.fmt_short());
+                            anti_entropy.set(Self::anti_entropy(self.state.snapshot(), self.sender.clone(), self.config.fast_anti_entropy_interval));
+                            continue;
+                        },
+                        Event::NeighborDown(peer) => {
+                            trace!("Peer down: {}, goodbye!", peer.fmt_short());
+                            continue;
+                        },
+                        e => {
+                            trace!("Ignoring event: {:?}", e);
+                            continue
+                        },
+                    };
+                    let msg = match postcard::from_bytes::<GossipMessage>(&msg.content) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            trace!("Error deserializing gossip message: {:?}", e);
+                            continue;
                         }
-                        // schedule next horizon application
-                        apply_horizon.set(Box::pin(tokio::time::sleep(horizon_period)));
+                    };
+                    match msg {
+                        GossipMessage::SignedValue(scope, key, value) => {
+                            if let Some(horizon) = self.horizon()
+                                && value.timestamp < horizon {
+                                    trace!("Ignoring value key={:?} epoch={} below horizon", key, value.timestamp);
+                                    continue;
+                                }
+                            let id = scope.fmt_short();
+                            trace!(%id, "Received signed value key={:?} epoch={}", key, value.timestamp);
+                            let Ok(_) = self.state.insert_signed_value(scope, key.clone(), value.clone()) else {
+                                continue;
+                            };
+                            trace!(%id, "Broadcasting internally");
+                            self.broadcast_tx.send(BroadcastItem::Entry((scope, key, value))).ok();
+                        }
                     }
-                    _ = tasks.next(), if !tasks.is_empty() => {}
                 }
+                res = &mut anti_entropy => {
+                    if let Err(e) = res {
+                        error!("Error in anti-entropy: {:?}", e);
+                        break;
+                    }
+                    // anti-entropy finished, start a new one
+                    anti_entropy.set(Self::anti_entropy(self.state.snapshot(), self.sender.clone(), self.config.anti_entropy_interval));
+                }
+                _ = &mut apply_horizon => {
+                    let expired = self.apply_horizon();
+                    for entry in expired {
+                        self.broadcast_tx.send(BroadcastItem::Expired(entry)).ok();
+                    }
+                    // schedule next horizon application
+                    apply_horizon.set(Box::pin(tokio::time::sleep(horizon_period)));
+                }
+                _ = tasks.next(), if !tasks.is_empty() => {}
             }
         }
     }
@@ -886,6 +882,7 @@ impl Default for Config {
 }
 
 pub mod util {
+    //! Utility functions for working with strings and nanosecond timestamps.
     use std::{
         fmt,
         time::{Duration, SystemTime},
@@ -994,7 +991,7 @@ mod peg_parser {
     use iroh::PublicKey;
 
     use crate::{
-        api::Filter,
+        Filter,
         util::{format_bytes, from_nanos},
     };
 

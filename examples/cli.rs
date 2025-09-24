@@ -6,8 +6,7 @@ use iroh::{PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
-    Config,
-    api::{self, Filter, Subscribe, SubscribeItem, SubscribeResult},
+    Client, Config, Filter, Subscribe, SubscribeItem, SubscribeMode, SubscribeResult,
     util::format_bytes,
 };
 use n0_future::{StreamExt, task::AbortOnDropHandle};
@@ -117,7 +116,7 @@ async fn main() -> n0_snafu::Result<()> {
         gossip.subscribe_and_join(topic, bootstrap_ids).await.e()?
     };
     println!("Joined the network, you can start issuing commands.");
-    let api = api::Client::local(topic, Config::DEBUG);
+    let api = Client::local(topic, Config::DEBUG);
     let ws = api.write(key.clone());
     // Create a reader for stdin
     let stdin = io::stdin();
@@ -174,7 +173,7 @@ async fn main() -> n0_snafu::Result<()> {
                         println!("#{id} Subscribe {filter}");
                         let sub = api.subscribe_with_opts(Subscribe {
                             filter,
-                            mode: api::SubscribeMode::Both,
+                            mode: SubscribeMode::Both,
                         });
                         let task = tokio::spawn(handle_subscription(id, sub));
                         subscribers.insert(id, AbortOnDropHandle::new(task));
@@ -245,7 +244,7 @@ mod command_parser {
     use bytes::Bytes;
     use iroh::PublicKey;
     use iroh_base::ticket::NodeTicket;
-    use iroh_smol_kv::api::Filter;
+    use iroh_smol_kv::Filter;
 
     use super::Command;
 

@@ -3,7 +3,7 @@ use std::{collections::HashSet, ops::Bound, pin::Pin, sync::Arc, time::Duration}
 use bytes::Bytes;
 use iroh::{PublicKey, SecretKey};
 use iroh_gossip::api::GossipTopic;
-use iroh_smol_kv::api::{self, Subscribe};
+use iroh_smol_kv::{self as w};
 use n0_future::{Stream, StreamExt};
 use snafu::Snafu;
 use tokio::sync::Mutex;
@@ -15,22 +15,22 @@ pub enum SubscribeMode {
     Both,
 }
 
-impl From<api::SubscribeMode> for SubscribeMode {
-    fn from(m: api::SubscribeMode) -> Self {
+impl From<w::SubscribeMode> for SubscribeMode {
+    fn from(m: w::SubscribeMode) -> Self {
         match m {
-            api::SubscribeMode::Current => SubscribeMode::Current,
-            api::SubscribeMode::Future => SubscribeMode::Future,
-            api::SubscribeMode::Both => SubscribeMode::Both,
+            w::SubscribeMode::Current => SubscribeMode::Current,
+            w::SubscribeMode::Future => SubscribeMode::Future,
+            w::SubscribeMode::Both => SubscribeMode::Both,
         }
     }
 }
 
-impl From<SubscribeMode> for api::SubscribeMode {
+impl From<SubscribeMode> for w::SubscribeMode {
     fn from(m: SubscribeMode) -> Self {
         match m {
-            SubscribeMode::Current => api::SubscribeMode::Current,
-            SubscribeMode::Future => api::SubscribeMode::Future,
-            SubscribeMode::Both => api::SubscribeMode::Both,
+            SubscribeMode::Current => w::SubscribeMode::Current,
+            SubscribeMode::Future => w::SubscribeMode::Future,
+            SubscribeMode::Both => w::SubscribeMode::Both,
         }
     }
 }
@@ -98,8 +98,8 @@ pub struct Filter {
     scope: Vec<Vec<u8>>,
 }
 
-impl From<api::Filter> for Filter {
-    fn from(f: api::Filter) -> Self {
+impl From<w::Filter> for Filter {
+    fn from(f: w::Filter) -> Self {
         let min_key = f.key.0.into();
         let max_key = f.key.1.into();
         let min_time = f.timestamp.0.into();
@@ -118,7 +118,7 @@ impl From<api::Filter> for Filter {
     }
 }
 
-impl TryFrom<Filter> for api::Filter {
+impl TryFrom<Filter> for w::Filter {
     type Error = PublicKeyError;
 
     fn try_from(f: Filter) -> Result<Self, Self::Error> {
@@ -136,7 +136,7 @@ impl TryFrom<Filter> for api::Filter {
             }
             Some(set)
         };
-        Ok(api::Filter {
+        Ok(w::Filter {
             key: (min_key, max_key),
             timestamp: (min_time, max_time),
             scope,
@@ -225,7 +225,7 @@ fn parse_public_key(key: &[u8]) -> Result<PublicKey, PublicKeyError> {
 pub fn parse_filter(text: String) -> Result<Arc<Filter>, FilterParseError> {
     use std::str::FromStr;
 
-    iroh_smol_kv::api::Filter::from_str(&text)
+    iroh_smol_kv::Filter::from_str(&text)
         .map_err(|e| FilterParseError::Invalid {
             message: e.to_string(),
         })
@@ -305,8 +305,8 @@ pub struct SignedValue {
     pub signature: Vec<u8>,
 }
 
-impl From<api::SignedValue> for SignedValue {
-    fn from(v: api::SignedValue) -> Self {
+impl From<w::SignedValue> for SignedValue {
+    fn from(v: w::SignedValue) -> Self {
         Self {
             timestamp: v.timestamp,
             value: v.value.to_vec(),
@@ -315,7 +315,7 @@ impl From<api::SignedValue> for SignedValue {
     }
 }
 
-impl TryFrom<SignedValue> for api::SignedValue {
+impl TryFrom<SignedValue> for w::SignedValue {
     type Error = SignatureError;
 
     fn try_from(v: SignedValue) -> Result<Self, Self::Error> {
@@ -349,29 +349,29 @@ pub enum SubscribeItem {
 
 impl std::fmt::Debug for SubscribeItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match api::SubscribeItem::try_from(self.clone()) {
+        match w::SubscribeItem::try_from(self.clone()) {
             Ok(item) => write!(f, "{item:?}"),
             Err(e) => write!(f, "Invalid({e})"),
         }
     }
 }
 
-impl TryFrom<SubscribeItem> for api::SubscribeItem {
+impl TryFrom<SubscribeItem> for w::SubscribeItem {
     type Error = TryFromSubscribeItemError;
 
     fn try_from(item: SubscribeItem) -> Result<Self, Self::Error> {
         match item {
-            SubscribeItem::Entry { scope, key, value } => Ok(api::SubscribeItem::Entry((
+            SubscribeItem::Entry { scope, key, value } => Ok(w::SubscribeItem::Entry((
                 parse_public_key(&scope)?,
                 key.into(),
                 value.try_into()?,
             ))),
-            SubscribeItem::CurrentDone => Ok(api::SubscribeItem::CurrentDone),
+            SubscribeItem::CurrentDone => Ok(w::SubscribeItem::CurrentDone),
             SubscribeItem::Expired {
                 scope,
                 key,
                 timestamp,
-            } => Ok(api::SubscribeItem::Expired((
+            } => Ok(w::SubscribeItem::Expired((
                 parse_public_key(&scope)?,
                 key.into(),
                 timestamp,
@@ -380,16 +380,16 @@ impl TryFrom<SubscribeItem> for api::SubscribeItem {
     }
 }
 
-impl From<api::SubscribeItem> for SubscribeItem {
-    fn from(item: api::SubscribeItem) -> Self {
+impl From<w::SubscribeItem> for SubscribeItem {
+    fn from(item: w::SubscribeItem) -> Self {
         match item {
-            api::SubscribeItem::Entry((scope, key, value)) => SubscribeItem::Entry {
+            w::SubscribeItem::Entry((scope, key, value)) => SubscribeItem::Entry {
                 scope: scope.as_ref().to_vec(),
                 key: key.to_vec(),
                 value: value.into(),
             },
-            api::SubscribeItem::CurrentDone => SubscribeItem::CurrentDone,
-            api::SubscribeItem::Expired((scope, key, timestamp)) => SubscribeItem::Expired {
+            w::SubscribeItem::CurrentDone => SubscribeItem::CurrentDone,
+            w::SubscribeItem::Expired((scope, key, timestamp)) => SubscribeItem::Expired {
                 scope: scope.as_ref().to_vec(),
                 key: key.to_vec(),
                 timestamp,
@@ -409,9 +409,7 @@ pub fn subscribe_item_debug(item: &SubscribeItem) -> String {
 #[allow(clippy::type_complexity)]
 pub struct SubscribeResponse {
     inner: Mutex<
-        Pin<
-            Box<dyn Stream<Item = Result<api::SubscribeItem, irpc::Error>> + Send + Sync + 'static>,
-        >,
+        Pin<Box<dyn Stream<Item = Result<w::SubscribeItem, irpc::Error>> + Send + Sync + 'static>>,
     >,
 }
 
@@ -498,7 +496,7 @@ impl From<ExpiryConfig> for iroh_smol_kv::ExpiryConfig {
 #[derive(uniffi::Object, Clone)]
 #[uniffi::export(Debug)]
 pub struct Client {
-    client: api::Client,
+    client: w::Client,
 }
 
 impl std::fmt::Debug for Client {
@@ -510,7 +508,7 @@ impl std::fmt::Debug for Client {
 impl Client {
     /// This can not be called from uniffi, since we can't make GossipTopic support uniffi.
     pub fn local(topic: GossipTopic, config: Config) -> Self {
-        let client = api::Client::local(topic, config.into());
+        let client = w::Client::local(topic, config.into());
         Self { client }
     }
 }
@@ -544,10 +542,10 @@ impl Client {
         filter: Arc<Filter>,
         mode: SubscribeMode,
     ) -> Result<Arc<SubscribeResponse>, PublicKeyError> {
-        let filter: api::Filter = (*filter).clone().try_into()?;
+        let filter: w::Filter = (*filter).clone().try_into()?;
         let stream = self
             .client
-            .subscribe_with_opts(Subscribe {
+            .subscribe_with_opts(w::Subscribe {
                 filter,
                 mode: mode.into(),
             })
@@ -576,7 +574,7 @@ impl Client {
 #[derive(uniffi::Object, Clone)]
 #[uniffi::export(Debug)]
 pub struct WriteScope {
-    write: api::WriteScope,
+    write: w::WriteScope,
 }
 
 impl std::fmt::Debug for WriteScope {

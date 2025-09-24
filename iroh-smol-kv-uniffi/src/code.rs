@@ -1,7 +1,7 @@
-use std::{collections::HashSet, ops::{Bound}, pin::Pin, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashSet, ops::Bound, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use iroh::{SecretKey};
+use iroh::SecretKey;
 use iroh_gossip::api::GossipTopic;
 use iroh_smol_kv::{self as w};
 use n0_future::{Stream, StreamExt};
@@ -69,7 +69,9 @@ impl PublicKey {
             });
         }
         let bytes: [u8; 32] = bytes.try_into().expect("checked above");
-        let key = iroh::PublicKey::from_bytes(&bytes).map_err(|e| PublicKeyError::Invalid { message: e.to_string() })?;
+        let key = iroh::PublicKey::from_bytes(&bytes).map_err(|e| PublicKeyError::Invalid {
+            message: e.to_string(),
+        })?;
         Ok(key.into())
     }
 
@@ -190,7 +192,11 @@ impl From<w::Filter> for Filter {
         let max_time = f.timestamp.1.into();
         let scope = f
             .scope
-            .map(|s| s.into_iter().map(|k| Arc::new(PublicKey::from(k))).collect())
+            .map(|s| {
+                s.into_iter()
+                    .map(|k| Arc::new(PublicKey::from(k)))
+                    .collect()
+            })
             .unwrap_or_default();
         Self {
             min_key,
@@ -203,7 +209,6 @@ impl From<w::Filter> for Filter {
 }
 
 impl From<Filter> for w::Filter {
-
     fn from(f: Filter) -> Self {
         let min_key = f.min_key.into();
         let max_key = f.max_key.into();
@@ -269,17 +274,13 @@ pub enum PutError {
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum JoinPeersError {
-    Irpc {
-        message: String,
-    },
+    Irpc { message: String },
 }
 
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum GetError {
-    Irpc {
-        message: String,
-    },
+    Irpc { message: String },
 }
 
 #[uniffi::export]
@@ -306,7 +307,6 @@ impl Filter {
             .map(Into::into)
             .map(Arc::new)
     }
-
 
     pub fn scopes(mut self: Arc<Self>, scopes: Vec<Arc<PublicKey>>) -> Arc<Self> {
         let this = Arc::make_mut(&mut self);
@@ -371,7 +371,6 @@ impl From<w::SignedValue> for SignedValue {
 }
 
 impl From<SignedValue> for w::SignedValue {
-
     fn from(v: SignedValue) -> Self {
         v.0
     }
@@ -402,7 +401,6 @@ impl std::fmt::Debug for SubscribeItem {
 }
 
 impl From<SubscribeItem> for w::SubscribeItem {
-
     fn from(item: SubscribeItem) -> Self {
         match item {
             SubscribeItem::Entry { scope, key, value } => w::SubscribeItem::Entry((
@@ -569,7 +567,11 @@ impl Client {
         Ok(Arc::new(WriteScope { write }))
     }
 
-    pub async fn get(&self, scope: Arc<PublicKey>, key: Vec<u8>) -> Result<Option<Vec<u8>>, GetError> {
+    pub async fn get(
+        &self,
+        scope: Arc<PublicKey>,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, GetError> {
         let res = self
             .client
             .get(iroh::PublicKey::from(scope.as_ref()), key)

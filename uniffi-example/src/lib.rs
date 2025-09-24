@@ -41,9 +41,6 @@ pub enum DbJoinPeersError {
     Ticket {
         message: String,
     },
-    AddNodeAddr {
-        message: String,
-    },
     #[snafu(transparent)]
     JoinPeers {
         source: kv::JoinPeersError,
@@ -81,9 +78,7 @@ impl Db {
             self.router
                 .endpoint()
                 .add_node_addr(ticket.node_addr().clone())
-                .map_err(|e| DbJoinPeersError::AddNodeAddr {
-                    message: e.to_string(),
-                })?;
+                .ok();
         }
         self.client.join_peers(ids).await?;
         Ok(())

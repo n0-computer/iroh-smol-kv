@@ -570,6 +570,7 @@ mod util {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::streams::HandlerMode;
 
     #[test]
     fn escape_unescape() {
@@ -591,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn one_node() -> testresult::TestResult<()> {
         let config = Config { key: vec![0; 32] };
-        let node = crate::streams::Api::new_in_runtime().await?;
+        let node = crate::streams::Api::new_in_runtime(config, HandlerMode::Sender).await?;
         let write = node.node_scope();
         let db = node.db();
         println!("Ticket: {}", node.ticket().await?);

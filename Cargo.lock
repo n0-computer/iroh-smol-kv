@@ -1942,6 +1942,7 @@ dependencies = [
 name = "iroh-streamplace"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "hex",
  "iroh",

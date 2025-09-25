@@ -31,23 +31,30 @@ func main() {
 	secret := make([]byte, 32)
     _, err := rand.Read(secret)
     panicIfErr(err)
+
 	fmt.Println("Starting with tickets", tickets)
 	config := sp.Config {
 		Key : secret,
 	}
 	fmt.Printf("Config created %+v\n", config)
-	db, err := sp.NewDb(config)
+	node, err := sp.ApiSender(config)
 	panicIfErr(err)
-	fmt.Println("db created", db.Ticket())
 
+	ticket, err := node.Ticket()
+	panicIfErr(err)
+
+	fmt.Println("db created", ticket)
 	if len(tickets) > 0 {
-		err = db.JoinPeers(tickets)
+		err = node.JoinPeers(tickets)
 		panicIfErr(err)
 	}
 
-	db.Put(nil, []byte("hello"), []byte("world"))
+	db := node.Db()
+	w := node.NodeScope()
+
+	w.Put(nil, []byte("hello"), []byte("world"))
 	stream := []byte("stream1")
-	db.Put(&stream, []byte("subscribed"), []byte("true"))
+	w.Put(&stream, []byte("subscribed"), []byte("true"))
 
 	filter := sp.NewFilter()
 	items, err := db.IterWithOpts(filter)

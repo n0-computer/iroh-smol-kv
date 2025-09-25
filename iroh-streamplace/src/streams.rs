@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use iroh::{NodeId, PublicKey, Watcher};
+use iroh::{NodeId, PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use irpc::{WithChannels, rpc::RemoteService};
@@ -69,8 +69,6 @@ mod api {
     use irpc::{channel::oneshot, rpc_requests};
     use serde::{Deserialize, Serialize};
 
-    pub const ALPN: &[u8] = b"/iroh/streamplace/1";
-
     /// Subscribe to the given `key`
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Subscribe {
@@ -132,10 +130,17 @@ pub enum HandlerMode {
 }
 
 impl HandlerMode {
-    pub async fn receiver(
-        f: impl Fn(String, Vec<u8>) -> Boxed<()> + Send + Sync + 'static,
-    ) -> Self {
+    pub fn receiver_fn(f: impl Fn(String, Vec<u8>) -> Boxed<()> + Send + Sync + 'static) -> Self {
         Self::Receiver(Box::new(f))
+    }
+
+    pub fn receiver(handler: Arc<dyn DataHandler>) -> Self {
+        Self::receiver_fn(move |id, data| {
+            let handler = handler.clone();
+            Box::pin(async move {
+                handler.handle_data(id, data).await;
+            })
+        })
     }
 }
 
@@ -165,6 +170,7 @@ struct Connection {
 impl Actor {
     pub async fn spawn(
         endpoint: iroh::Endpoint,
+        config: iroh_smol_kv::Config,
         handler: HandlerMode,
     ) -> Result<(Api, impl Future<Output = ()>), iroh_gossip::api::ApiError> {
         let (rpc_tx, rpc_rx) = tokio::sync::mpsc::channel::<RpcMessage>(32);
@@ -180,7 +186,7 @@ impl Actor {
             .spawn();
         let topic = gossip.subscribe(topic, vec![]).await?;
         let secret = router.endpoint().secret_key().clone();
-        let client = iroh_smol_kv::Client::local(topic, iroh_smol_kv::Config::default());
+        let client = iroh_smol_kv::Client::local(topic, config);
         let write = crate::WriteScope::new(client.write(secret.clone()));
         let client = crate::Client::new(client);
         let actor = Self {
@@ -428,15 +434,23 @@ pub struct Api {
 }
 
 impl Api {
-    pub(crate) async fn new_in_runtime() -> Result<Arc<Self>, CreateError> {
+    pub(crate) async fn new_in_runtime(
+        config: crate::Config,
+        handler: HandlerMode,
+    ) -> Result<Arc<Self>, CreateError> {
+        let secret_key = SecretKey::from_bytes(&<[u8; 32]>::try_from(config.key).map_err(|e| {
+            CreateError::PrivateKey {
+                size: e.len() as u64,
+            }
+        })?);
         let endpoint = iroh::Endpoint::builder()
-            .secret_key(iroh::SecretKey::generate(&mut rand::rngs::OsRng))
+            .secret_key(secret_key)
             .bind()
             .await
             .map_err(|e| CreateError::Bind {
                 message: e.to_string(),
             })?;
-        let (api, actor) = Actor::spawn(endpoint, HandlerMode::Sender)
+        let (api, actor) = Actor::spawn(endpoint, Default::default(), handler)
             .await
             .map_err(|e| CreateError::Subscribe {
                 message: e.to_string(),
@@ -446,13 +460,26 @@ impl Api {
         Ok(Arc::new(api))
     }
 }
+#[uniffi::export(with_foreign)]
+#[async_trait::async_trait]
+pub trait DataHandler: Send + Sync {
+    async fn handle_data(&self, topic: String, data: Vec<u8>);
+}
 
 #[uniffi::export]
 impl Api {
     /// Create a new streamplace client node.
     #[uniffi::constructor]
-    pub async fn sender() -> Result<Arc<Self>, CreateError> {
-        crate::RUNTIME.block_on(Self::new_in_runtime())
+    pub async fn sender(config: crate::Config) -> Result<Arc<Self>, CreateError> {
+        crate::RUNTIME.block_on(Self::new_in_runtime(config, HandlerMode::Sender))
+    }
+
+    #[uniffi::constructor]
+    pub async fn receiver(
+        config: crate::Config,
+        handler: Arc<dyn DataHandler>,
+    ) -> Result<Arc<Self>, CreateError> {
+        crate::RUNTIME.block_on(Self::new_in_runtime(config, HandlerMode::receiver(handler)))
     }
 
     /// Get a handle to the db to watch for changes locally or globally.

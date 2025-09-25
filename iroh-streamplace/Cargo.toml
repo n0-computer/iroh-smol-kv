@@ -22,6 +22,7 @@ irpc-iroh = "0.8.0"
 serde = "1.0.226"
 tracing = "0.1.41"
 ref-cast = "1.0.24"
+async-trait = "0.1.89"
 
 [build-dependencies]
 uniffi = { version = "0.28.3", features = ["build"] }

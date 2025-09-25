@@ -4,6 +4,7 @@ use iroh_smol_kv as w;
 
 use super::{PublicKey, SignedValue};
 
+/// An item returned from a subscription.
 #[derive(Clone, uniffi::Enum)]
 pub enum SubscribeItem {
     Entry {

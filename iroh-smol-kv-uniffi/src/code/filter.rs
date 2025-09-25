@@ -5,6 +5,7 @@ use snafu::Snafu;
 
 use super::{KeyBound, PublicKey, TimeBound};
 
+/// A filter for subscriptions and iterations.
 #[derive(uniffi::Object, Debug, Clone)]
 pub struct Filter {
     min_key: KeyBound,

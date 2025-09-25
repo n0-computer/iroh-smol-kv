@@ -1,5 +1,6 @@
 use std::ops::Bound;
 
+/// A bound on time for filtering.
 #[derive(uniffi::Enum, Debug, Clone, Copy)]
 pub enum TimeBound {
     Unbounded,

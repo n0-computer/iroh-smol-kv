@@ -2,6 +2,7 @@ use std::ops::Bound;
 
 use bytes::Bytes;
 
+/// A bound on keys for filtering.
 #[derive(uniffi::Enum, Debug, Clone)]
 pub enum KeyBound {
     Unbounded,

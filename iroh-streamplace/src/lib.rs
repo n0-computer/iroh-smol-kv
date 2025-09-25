@@ -14,8 +14,8 @@ use n0_future::{Stream, StreamExt};
 use snafu::Snafu;
 use tokio::sync::Mutex;
 
+// the files here are just copied from iroh-smol-kv-uniffi/src/code
 mod kv {
-
     mod public_key;
     pub use public_key::PublicKey;
     mod time_bound;
@@ -23,8 +23,17 @@ mod kv {
     mod subscribe_mode;
     pub use subscribe_mode::SubscribeMode;
 }
-use kv::{PublicKey, SubscribeMode, TimeBound};
+pub use kv::{PublicKey, SubscribeMode, TimeBound};
 
+/// An eventually consistent key value store to store data about nodes and streams.
+///
+/// You can store data either for a stream or globally using [`Db::put`].
+/// You can subscribe to data using [`Db::subscribe`]. You can filter by
+/// scope (usually a node's public key), stream (or global), and time range using [`Filter`].
+///
+/// Subscriptions can be for the current data, new data, or both, configured via [`SubscribeMode`].
+///
+/// For getting just the current data, you can also use [`Db::iter_with_opts`].
 #[derive(uniffi::Object)]
 #[uniffi::export(Debug)]
 pub struct Db {
@@ -41,30 +50,41 @@ impl fmt::Debug for Db {
     }
 }
 
+/// Error creating a new database node.
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum CreateError {
-    Key { size: u64 },
+    /// The provided private key is invalid (not 32 bytes).
+    PrivateKey { size: u64 },
+    /// Failed to bind the iroh endpoint.
     Bind { message: String },
+    /// Failed to subscribe to the gossip topic.
     Subscribe { message: String },
 }
 
+/// Error joining peers.
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum JoinPeersError {
+    /// Failed to parse a provided iroh node ticket.
     Ticket { message: String },
+    /// Error during the join peers operation.
     Irpc { message: String },
 }
 
+/// Error putting a value into the database.
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum PutError {
+    /// Error during the put operation.
     Irpc { message: String },
 }
 
+/// Configuration for a new database node.
 #[derive(uniffi::Record)]
 pub struct Config {
-    key: Vec<u8>,
+    /// An Ed25519 secret key as a 32 byte array.
+    pub key: Vec<u8>,
 }
 
 #[derive(uniffi::Enum, Debug, Clone)]
@@ -74,6 +94,7 @@ enum StreamFilter {
     Stream(Vec<u8>),
 }
 
+/// A filter for subscriptions and iteration.
 #[derive(uniffi::Object, Debug, Clone)]
 pub struct Filter {
     scope: Option<Vec<Arc<PublicKey>>>,
@@ -171,12 +192,15 @@ impl From<Filter> for iroh_smol_kv::Filter {
 static RUNTIME: LazyLock<tokio::runtime::Runtime> =
     LazyLock::new(|| tokio::runtime::Runtime::new().unwrap());
 
+/// Error getting the next item from a subscription.
 #[derive(uniffi::Enum, Snafu, Debug)]
 #[snafu(module)]
 pub enum SubscribeNextError {
+    /// Error during the subscribe next operation.
     Irpc { message: String },
 }
 
+/// An entry returned from the database.
 #[derive(uniffi::Record, Debug, PartialEq, Eq)]
 pub struct Entry {
     scope: Arc<PublicKey>,
@@ -186,6 +210,7 @@ pub struct Entry {
     timestamp: u64,
 }
 
+/// An item returned from a subscription.
 #[derive(uniffi::Enum, Debug)]
 pub enum SubscribeItem {
     Entry {
@@ -234,6 +259,7 @@ impl From<iroh_smol_kv::SubscribeItem> for SubscribeItem {
     }
 }
 
+/// A response to a subscribe request. This can be used as a stream of [`SubscribeItem`]s.
 #[derive(uniffi::Object)]
 #[uniffi::export(Debug)]
 #[allow(clippy::type_complexity)]
@@ -250,8 +276,8 @@ pub struct SubscribeResponse {
     >,
 }
 
-impl std::fmt::Debug for SubscribeResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SubscribeResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SubscribeResponse").finish_non_exhaustive()
     }
 }
@@ -270,6 +296,10 @@ impl SubscribeResponse {
     }
 }
 
+/// Options for subscribing.
+///
+/// `filter` specifies what to subscribe to.
+/// `mode` specifies whether to get current items, new items, or both.
 #[derive(uniffi::Record)]
 pub struct SubscribeOpts {
     filter: Arc<Filter>,
@@ -410,7 +440,7 @@ impl Db {
             .with_thread_names(true)
             .init();
         let key = SecretKey::from_bytes(&<[u8; 32]>::try_from(config.key).map_err(|e| {
-            CreateError::Key {
+            CreateError::PrivateKey {
                 size: e.len() as u64,
             }
         })?);

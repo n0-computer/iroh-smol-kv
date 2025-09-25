@@ -1,5 +1,6 @@
 use iroh_smol_kv as w;
 
+/// A signed value stored in the database.
 #[derive(Debug, Clone, uniffi::Object)]
 #[uniffi::export(Debug)]
 pub struct SignedValue(w::SignedValue);

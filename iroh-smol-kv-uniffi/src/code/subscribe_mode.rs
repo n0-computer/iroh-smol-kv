@@ -1,4 +1,6 @@
 use iroh_smol_kv as w;
+
+/// Subscription mode for key-value subscriptions.
 #[derive(uniffi::Enum, Debug, Clone, Copy)]
 pub enum SubscribeMode {
     Current,

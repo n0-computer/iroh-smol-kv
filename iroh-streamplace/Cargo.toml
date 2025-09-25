@@ -18,6 +18,10 @@ rand = "0.8.5"
 iroh-base = "0.92"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 hex = "0.4.3"
+irpc-iroh = "0.8.0"
+serde = "1.0.226"
+tracing = "0.1.41"
+ref-cast = "1.0.24"
 
 [build-dependencies]
 uniffi = { version = "0.28.3", features = ["build"] }

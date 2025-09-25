@@ -1,18 +1,17 @@
 use core::fmt;
 use std::{
-    collections::HashSet,
     ops::Bound,
     pin::Pin,
-    str::FromStr,
     sync::{Arc, LazyLock},
 };
 
-use iroh::{SecretKey, Watcher};
-use iroh_base::ticket::NodeTicket;
-use iroh_gossip::{net::Gossip, proto::TopicId};
+use bytes::Bytes;
 use n0_future::{Stream, StreamExt};
+use ref_cast::RefCast;
 use snafu::Snafu;
 use tokio::sync::Mutex;
+
+mod streams;
 
 // the files here are just copied from iroh-smol-kv-uniffi/src/code
 mod kv {
@@ -24,31 +23,6 @@ mod kv {
     pub use subscribe_mode::SubscribeMode;
 }
 pub use kv::{PublicKey, SubscribeMode, TimeBound};
-
-/// An eventually consistent key value store to store data about nodes and streams.
-///
-/// You can store data either for a stream or globally using [`Db::put`].
-/// You can subscribe to data using [`Db::subscribe`]. You can filter by
-/// scope (usually a node's public key), stream (or global), and time range using [`Filter`].
-///
-/// Subscriptions can be for the current data, new data, or both, configured via [`SubscribeMode`].
-///
-/// For getting just the current data, you can also use [`Db::iter_with_opts`].
-#[derive(uniffi::Object)]
-#[uniffi::export(Debug)]
-pub struct Db {
-    router: iroh::protocol::Router,
-    client: iroh_smol_kv::Client,
-    write: iroh_smol_kv::WriteScope,
-}
-
-impl fmt::Debug for Db {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Db")
-            .field("id", &self.router.endpoint().node_id())
-            .finish_non_exhaustive()
-    }
-}
 
 /// Error creating a new database node.
 #[derive(Debug, Snafu, uniffi::Error)]
@@ -200,6 +174,14 @@ pub enum SubscribeNextError {
     Irpc { message: String },
 }
 
+/// Error getting the next item from a subscription.
+#[derive(uniffi::Enum, Snafu, Debug)]
+#[snafu(module)]
+pub enum WriteError {
+    /// The provided private key is invalid (not 32 bytes).
+    PrivateKeySize { size: u64 },
+}
+
 /// An entry returned from the database.
 #[derive(uniffi::Record, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -259,7 +241,9 @@ impl From<iroh_smol_kv::SubscribeItem> for SubscribeItem {
     }
 }
 
-/// A response to a subscribe request. This can be used as a stream of [`SubscribeItem`]s.
+/// A response to a subscribe request.
+///
+/// This can be used as a stream of [`SubscribeItem`]s.
 #[derive(uniffi::Object)]
 #[uniffi::export(Debug)]
 #[allow(clippy::type_complexity)]
@@ -315,30 +299,70 @@ impl From<SubscribeOpts> for iroh_smol_kv::Subscribe {
     }
 }
 
-#[uniffi::export]
-impl Db {
-    /// Create a new database node with the given configuration.
-    #[uniffi::constructor]
-    pub async fn new(config: Config) -> Result<Arc<Self>, CreateError> {
-        // block on the runtime, since we need one for iroh
-        RUNTIME.block_on(Self::new_in_runtime(config))
-    }
+#[derive(Clone, Debug, RefCast, uniffi::Object)]
+#[repr(transparent)]
+pub struct WriteScope(iroh_smol_kv::WriteScope);
 
-    /// Put a value into the database, optionally in a specific stream.
+#[uniffi::export]
+impl WriteScope {
     pub async fn put(
         &self,
         stream: Option<Vec<u8>>,
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(), PutError> {
-        let encoded = util::encode_stream_and_key(stream.as_deref(), &key);
-        self.write
-            .put(encoded, value)
+        self.put_impl(stream, key, value.into())
             .await
             .map_err(|e| PutError::Irpc {
                 message: e.to_string(),
-            })?;
+            })
+    }
+}
+
+impl WriteScope {
+    pub fn new(inner: iroh_smol_kv::WriteScope) -> Self {
+        Self(inner)
+    }
+
+    /// Put a value into the database, optionally in a specific stream.
+    pub async fn put_impl(
+        &self,
+        stream: Option<impl AsRef<[u8]>>,
+        key: impl AsRef<[u8]>,
+        value: Bytes,
+    ) -> Result<(), irpc::Error> {
+        let key = key.as_ref();
+        let stream = stream.as_ref().map(|s| s.as_ref());
+        let encoded = util::encode_stream_and_key(stream, key);
+        self.0.put(encoded, value).await?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, RefCast, uniffi::Object)]
+#[repr(transparent)]
+pub struct Client(iroh_smol_kv::Client);
+
+impl Client {
+    pub fn new(inner: iroh_smol_kv::Client) -> Self {
+        Self(inner)
+    }
+
+    pub fn inner(&self) -> &iroh_smol_kv::Client {
+        &self.0
+    }
+}
+
+#[uniffi::export]
+impl Client {
+    pub fn write(&self, secret: Vec<u8>) -> Result<Arc<WriteScope>, WriteError> {
+        let secret = iroh::SecretKey::from_bytes(&secret.try_into().map_err(|e: Vec<u8>| {
+            WriteError::PrivateKeySize {
+                size: e.len() as u64,
+            }
+        })?);
+        let write = self.0.write(secret);
+        Ok(Arc::new(WriteScope::new(write)))
     }
 
     pub async fn iter_with_opts(
@@ -384,95 +408,67 @@ impl Db {
     pub fn subscribe_with_opts(&self, opts: SubscribeOpts) -> Arc<SubscribeResponse> {
         Arc::new(SubscribeResponse {
             inner: Mutex::new(Box::pin(
-                self.client.subscribe_with_opts(opts.into()).stream_raw(),
+                self.0.subscribe_with_opts(opts.into()).stream_raw(),
             )),
         })
     }
 
-    /// Get the node ticket for this node.
-    pub async fn ticket(&self) -> String {
-        self.router.endpoint().home_relay().initialized().await;
-        let addr = self.router.endpoint().node_addr().initialized().await;
-        let ticket = NodeTicket::from(addr);
-        ticket.to_string()
-    }
+    // /// Get the node ticket for this node.
+    // pub async fn ticket(&self) -> String {
+    //     self.router.endpoint().home_relay().initialized().await;
+    //     let addr = self.router.endpoint().node_addr().initialized().await;
+    //     let ticket = NodeTicket::from(addr);
+    //     ticket.to_string()
+    // }
 
-    /// Join a set of peers given their tickets.
-    pub async fn join_peers(&self, peers: Vec<String>) -> Result<(), JoinPeersError> {
-        let keys: Vec<NodeTicket> = peers
-            .into_iter()
-            .map(|s| NodeTicket::from_str(&s))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| JoinPeersError::Ticket {
-                message: e.to_string(),
-            })?;
-        let ids = keys
-            .iter()
-            .map(|k| k.node_addr().node_id)
-            .collect::<HashSet<_>>();
-        for ticket in keys {
-            self.router
-                .endpoint()
-                .add_node_addr(ticket.node_addr().clone())
-                .ok();
-        }
-        self.client
-            .join_peers(ids)
-            .await
-            .map_err(|e| JoinPeersError::Irpc {
-                message: e.to_string(),
-            })?;
-        Ok(())
-    }
-
-    /// Get the public key of this node.
-    pub fn public(&self) -> Arc<PublicKey> {
-        Arc::new(self.router.endpoint().node_id().into())
-    }
+    // /// Get the public key of this node.
+    // pub fn public(&self) -> Arc<PublicKey> {
+    //     Arc::new(self.router.endpoint().node_id().into())
+    // }
 }
 
-impl Db {
-    /// Internal function to create a new Db instance in the tokio runtime.
-    pub(crate) async fn new_in_runtime(config: Config) -> Result<Arc<Self>, CreateError> {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .init();
-        let key = SecretKey::from_bytes(&<[u8; 32]>::try_from(config.key).map_err(|e| {
-            CreateError::PrivateKey {
-                size: e.len() as u64,
-            }
-        })?);
-        let endpoint = iroh::Endpoint::builder()
-            .secret_key(key.clone())
-            .bind()
-            .await
-            .map_err(|e| CreateError::Bind {
-                message: e.to_string(),
-            })?;
-        let _ = endpoint.home_relay().initialized().await;
-        let _ = endpoint.node_addr().initialized().await;
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-        let topic = TopicId::from_bytes([0; 32]);
-        let router = iroh::protocol::Router::builder(endpoint)
-            .accept(iroh_gossip::ALPN, gossip.clone())
-            .spawn();
-        let topic = gossip
-            .subscribe(topic, vec![])
-            .await
-            .map_err(|e| CreateError::Subscribe {
-                message: e.to_string(),
-            })?;
-        let client = iroh_smol_kv::Client::local(topic, Default::default());
-        let write = client.write(key);
-        Ok(Arc::new(Self {
-            router,
-            client,
-            write,
-        }))
-    }
-}
+// impl Db {
+//     /// Internal function to create a new Db instance in the tokio runtime.
+//     pub(crate) async fn new_in_runtime(config: Config) -> Result<Arc<Self>, CreateError> {
+//         tracing_subscriber::fmt()
+//             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+//             .with_thread_ids(true)
+//             .with_thread_names(true)
+//             .init();
+//         let key = SecretKey::from_bytes(&<[u8; 32]>::try_from(config.key).map_err(|e| {
+//             CreateError::PrivateKey {
+//                 size: e.len() as u64,
+//             }
+//         })?);
+//         let endpoint = iroh::Endpoint::builder()
+//             .secret_key(key.clone())
+//             .bind()
+//             .await
+//             .map_err(|e| CreateError::Bind {
+//                 message: e.to_string(),
+//             })?;
+//         let _ = endpoint.home_relay().initialized().await;
+//         let _ = endpoint.node_addr().initialized().await;
+//         let gossip = Gossip::builder().spawn(endpoint.clone());
+//         let topic = TopicId::from_bytes([0; 32]);
+//         let router = iroh::protocol::Router::builder(endpoint)
+//             .accept(iroh_gossip::ALPN, gossip.clone())
+//             .spawn();
+//         let topic = gossip
+//             .subscribe(topic, vec![])
+//             .await
+//             .map_err(|e| CreateError::Subscribe {
+//                 message: e.to_string(),
+//             })?;
+//         let client = iroh_smol_kv::Client::local(topic, Default::default());
+//         let write = client.write(key);
+//         Ok(Arc::new(Self {
+//             router,
+//             client,
+//             write,
+//         }))
+//     }
+// }
 
 uniffi::setup_scaffolding!();
 
@@ -595,14 +591,17 @@ mod tests {
     #[tokio::test]
     async fn one_node() -> testresult::TestResult<()> {
         let config = Config { key: vec![0; 32] };
-        let node = Db::new_in_runtime(config).await?;
-        println!("Node ID: {}", node.public());
-        println!("Ticket: {}", node.ticket().await);
-        node.put(Some(b"stream1".to_vec()), b"s".to_vec(), b"y".to_vec())
+        let node = crate::streams::Api::new_in_runtime().await?;
+        let write = node.node_scope();
+        let db = node.db();
+        println!("Ticket: {}", node.ticket().await?);
+        write
+            .put(Some(b"stream1".to_vec()), b"s".to_vec(), b"y".to_vec())
             .await?;
-        node.put(Some(b"stream2".to_vec()), b"s".to_vec(), b"y".to_vec())
+        write
+            .put(Some(b"stream2".to_vec()), b"s".to_vec(), b"y".to_vec())
             .await?;
-        let res = node.subscribe_with_opts(SubscribeOpts {
+        let res = db.subscribe_with_opts(SubscribeOpts {
             filter: Filter::new(),
             mode: SubscribeMode::Both,
         });
@@ -612,11 +611,11 @@ mod tests {
             }
             println!("Got item: {item:?}");
         }
-        let res = node
+        let res = db
             .iter_with_opts(
                 Filter::new()
                     .stream(b"stream1".to_vec())
-                    .scope(node.public()),
+                    .scope(node.node_id().await?),
             )
             .await?;
         println!("Iter result: {res:?}");

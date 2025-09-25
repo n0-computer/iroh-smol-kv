@@ -6,7 +6,7 @@ use iroh::{PublicKey, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
-    Client, Config, Filter, Subscribe, SubscribeItem, SubscribeMode, SubscribeResult,
+    Client, Config, Filter, Subscribe, SubscribeItem, SubscribeMode, SubscribeResponse,
     util::format_bytes,
 };
 use n0_future::{StreamExt, task::AbortOnDropHandle};
@@ -46,7 +46,7 @@ enum Command {
     Other { raw: String },
 }
 
-async fn handle_subscription(id: usize, sub: SubscribeResult) {
+async fn handle_subscription(id: usize, sub: SubscribeResponse) {
     let stream = sub.stream_raw();
     tokio::pin!(stream);
     while let Some(item) = stream.next().await {

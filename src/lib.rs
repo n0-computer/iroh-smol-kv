@@ -263,16 +263,25 @@ impl Filter {
             timestamp: self.timestamp,
         }
     }
+
     /// Sets the timestamp filter to a range of system times.
     pub fn timestamps(self, range: impl RangeBounds<SystemTime>) -> Self {
         let start = range.start_bound().map(to_nanos);
         let end = range.end_bound().map(to_nanos);
+        self.timestamps_nanos((start, end))
+    }
+
+    /// Sets the timestamp filter to a range of system times.
+    pub fn timestamps_nanos(self, range: impl RangeBounds<u64>) -> Self {
+        let start = range.start_bound().cloned();
+        let end = range.end_bound().cloned();
         Self {
             scope: self.scope,
             key: self.key,
             timestamp: (start, end),
         }
     }
+
     /// Checks if the given entry matches the filter.
     pub fn contains(&self, scope: &PublicKey, key: &[u8], timestamp: u64) -> bool {
         self.contains_key(scope, key) && self.timestamp.contains(&timestamp)
@@ -304,9 +313,9 @@ impl IterResult {
     }
 }
 
-pub struct SubscribeResult(BoxFuture<Result<mpsc::Receiver<SubscribeItem>, irpc::Error>>);
+pub struct SubscribeResponse(BoxFuture<Result<mpsc::Receiver<SubscribeItem>, irpc::Error>>);
 
-impl SubscribeResult {
+impl SubscribeResponse {
     /// Stream of entries from the subscription, as raw SubscribeResponse values.
     pub fn stream_raw(
         self,
@@ -426,15 +435,15 @@ impl Client {
         Ok(value.map(|sv| sv.value))
     }
 
-    pub fn subscribe(&self) -> SubscribeResult {
+    pub fn subscribe(&self) -> SubscribeResponse {
         self.subscribe_with_opts(Subscribe {
             mode: SubscribeMode::Both,
             filter: Filter::ALL,
         })
     }
 
-    pub fn subscribe_with_opts(&self, subscribe: Subscribe) -> SubscribeResult {
-        SubscribeResult(Box::pin(self.0.server_streaming(subscribe, 32)))
+    pub fn subscribe_with_opts(&self, subscribe: Subscribe) -> SubscribeResponse {
+        SubscribeResponse(Box::pin(self.0.server_streaming(subscribe, 32)))
     }
 
     pub fn iter_with_opts(&self, filter: Filter) -> IterResult {

@@ -84,8 +84,8 @@ impl Db {
         Ok(())
     }
 
-    pub fn write_scope(&self) -> Result<Arc<kv::WriteScope>, kv::PrivateKeyError> {
-        self.client.write_scope(self.secret())
+    pub fn write(&self) -> Result<Arc<kv::WriteScope>, kv::PrivateKeyError> {
+        self.client.write(self.secret())
     }
 
     pub fn secret(&self) -> Vec<u8> {

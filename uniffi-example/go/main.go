@@ -41,7 +41,7 @@ func main() {
 	err := db.JoinPeers(tickets)
 	panicIfErr(err)
 
-	write, err := db.WriteScope()
+	write, err := db.Write()
 	panicIfErr(err)
 	fmt.Println("Got write scope", write.DebugString())
 

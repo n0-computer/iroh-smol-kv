@@ -1,3 +1,4 @@
+use core::fmt;
 use std::{collections::HashSet, ops::Bound, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
@@ -12,10 +13,16 @@ use tokio::sync::Mutex;
 ///
 /// The key itself is just a 32 byte array, but a key has associated crypto
 /// information that is cached for performance reasons.
-#[derive(Debug, Clone, Copy, Eq, Ord, PartialOrd, uniffi::Object)]
+#[derive(Clone, Copy, Eq, Ord, PartialOrd, uniffi::Object)]
 #[uniffi::export(Display)]
 pub struct PublicKey {
     pub(crate) key: [u8; 32],
+}
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        iroh::PublicKey::from(self).fmt(f)
+    }
 }
 
 impl From<iroh::PublicKey> for PublicKey {
@@ -268,13 +275,29 @@ pub enum FilterParseError {
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum PutError {
-    PutFailed { message: String },
+    Irpc { message: String },
+}
+
+impl From<irpc::Error> for PutError {
+    fn from(e: irpc::Error) -> Self {
+        PutError::Irpc {
+            message: e.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Snafu, uniffi::Error)]
 #[snafu(module)]
 pub enum JoinPeersError {
     Irpc { message: String },
+}
+
+impl From<irpc::Error> for JoinPeersError {
+    fn from(e: irpc::Error) -> Self {
+        JoinPeersError::Irpc {
+            message: e.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Snafu, uniffi::Error)]
@@ -484,6 +507,12 @@ pub struct Config {
     pub expiry: Option<ExpiryConfig>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        iroh_smol_kv::Config::default().into()
+    }
+}
+
 #[uniffi::export]
 fn new_config() -> Config {
     iroh_smol_kv::Config::default().into()
@@ -557,7 +586,7 @@ impl Client {
 
 #[uniffi::export]
 impl Client {
-    pub fn write_scope(&self, secret: Vec<u8>) -> Result<Arc<WriteScope>, PrivateKeyError> {
+    pub fn write(&self, secret: Vec<u8>) -> Result<Arc<WriteScope>, PrivateKeyError> {
         let secret = SecretKey::from_bytes(&secret.try_into().map_err(|e: Vec<u8>| {
             PrivateKeyError::Length {
                 size: e.len() as u64,
@@ -606,12 +635,7 @@ impl Client {
             .map(|p| iroh::PublicKey::from(p.as_ref()))
             .collect::<Vec<_>>();
 
-        self.client
-            .join_peers(peers)
-            .await
-            .map_err(|e| JoinPeersError::Irpc {
-                message: e.to_string(),
-            })?;
+        self.client.join_peers(peers).await?;
         Ok(())
     }
 }
@@ -633,11 +657,6 @@ impl std::fmt::Debug for WriteScope {
 #[uniffi::export]
 impl WriteScope {
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), PutError> {
-        self.write
-            .put(key, value)
-            .await
-            .map_err(|e| PutError::PutFailed {
-                message: e.to_string(),
-            })
+        Ok(self.write.put(key, value).await?)
     }
 }

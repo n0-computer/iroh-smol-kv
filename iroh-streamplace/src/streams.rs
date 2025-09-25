@@ -268,19 +268,17 @@ impl Actor {
                     inner: rpc::Unsubscribe { key, remote_id },
                     ..
                 } = sub;
-                if let Some(e) = self.subscriptions.get_mut(&key) {
-                    if !e.remove(&remote_id) {
+                if let Some(e) = self.subscriptions.get_mut(&key)
+                    && !e.remove(&remote_id) {
                         warn!(
                             "unsubscribe: no subscription for {} from {}",
                             key, remote_id
                         );
                     }
-                }
-                if let Some(subscriptions) = self.subscriptions.get(&key) {
-                    if subscriptions.is_empty() {
+                if let Some(subscriptions) = self.subscriptions.get(&key)
+                    && subscriptions.is_empty() {
                         self.subscriptions.remove(&key);
                     }
-                }
                 self.update_subscriptions(&key).await;
                 tx.send(()).await.ok();
             }

@@ -1,0 +1,32 @@
+[package]
+name = "iroh-streamplace"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1"
+iroh = "0.92"
+iroh-gossip = "0.92"
+irpc = "0.8"
+n0-future = "0.2"
+snafu = "0.8"
+tokio = "1.47"
+uniffi = "0.28"
+iroh-smol-kv = { version = "0.1", path = ".." }
+
+rand = "0.8.5"
+iroh-base = "0.92"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+hex = "0.4.3"
+
+[build-dependencies]
+uniffi = { version = "0.28.3", features = ["build"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[dev-dependencies]
+testresult = "0.4.1"
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["iroh-smol-kv"]

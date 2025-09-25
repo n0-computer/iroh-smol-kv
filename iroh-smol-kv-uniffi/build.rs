@@ -10,8 +10,30 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("generated_macro.rs");
 
-    // Read the code.rs file
-    let code_content = fs::read_to_string("src/code.rs").expect("Failed to read src/code.rs");
+    let mut all = String::new();
+    for entry in fs::read_dir("src/code").expect("Failed to read src/code directory") {
+        let entry = entry.expect("Failed to read entry in src/code");
+        assert!(
+            entry
+                .file_type()
+                .expect("Failed to get file type")
+                .is_file()
+        );
+        let path = entry.path();
+        assert!(path.extension().and_then(|s| s.to_str()) == Some("rs"));
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("Failed to get file stem");
+        let contents = fs::read_to_string(&path).expect("Failed to read code file");
+        all.push_str(&format!(
+            r#"mod {stem} {{
+{contents}
+}}
+pub use {stem}::*;
+"#
+        ));
+    }
 
     // Wrap it in a macro
     let macro_content = format!(
@@ -23,10 +45,7 @@ fn main() {
 #[macro_export]
 macro_rules! generate_uniffi_support {{
     () => {{
-        mod _generate_uniffi_support {{
-          {code_content}
-        }}
-        pub use _generate_uniffi_support::*;
+{all}
     }};
 }}
 "#
@@ -36,5 +55,5 @@ macro_rules! generate_uniffi_support {{
     fs::write(&dest_path, macro_content).expect("Failed to write generated macro");
 
     // Tell Cargo to rerun if code.rs changes
-    println!("cargo:rerun-if-changed=src/code.rs");
+    println!("cargo:rerun-if-changed=src/code/*");
 }

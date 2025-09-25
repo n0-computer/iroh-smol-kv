@@ -43,4 +43,4 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 n0-snafu = "0.2.1"
 
 [workspace]
-members = ["uniffi-example", "iroh-smol-kv-uniffi"]
+members = ["uniffi-example", "iroh-smol-kv-uniffi", "iroh-streamplace"]

@@ -3,6 +3,7 @@ use std::{
     ops::Bound,
     pin::Pin,
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -12,6 +13,7 @@ use snafu::Snafu;
 use tokio::sync::Mutex;
 
 mod streams;
+pub use streams::{Api, DataHandler};
 
 // the files here are just copied from iroh-smol-kv-uniffi/src/code
 mod kv {
@@ -30,6 +32,8 @@ pub use kv::{PublicKey, SubscribeMode, TimeBound};
 pub enum CreateError {
     /// The provided private key is invalid (not 32 bytes).
     PrivateKey { size: u64 },
+    /// The provided gossip topic is invalid (not 32 bytes).
+    Topic { size: u64 },
     /// Failed to bind the iroh endpoint.
     Bind { message: String },
     /// Failed to subscribe to the gossip topic.
@@ -59,6 +63,14 @@ pub enum PutError {
 pub struct Config {
     /// An Ed25519 secret key as a 32 byte array.
     pub key: Vec<u8>,
+    /// The gossip topic to use. Must be 32 bytes.
+    ///
+    /// You can use e.g. a BLAKE3 hash of a topic string here. This can be used
+    /// as a cheap way to have a shared secret - nodes that do not know the topic
+    /// cannot connect to the swarm.
+    pub topic: Vec<u8>,
+    /// Maximum duration to wait for sending a stream piece to a peer.
+    pub max_send_duration: Duration,
 }
 
 #[derive(uniffi::Enum, Debug, Clone)]
@@ -591,7 +603,11 @@ mod tests {
 
     #[tokio::test]
     async fn one_node() -> testresult::TestResult<()> {
-        let config = Config { key: vec![0; 32] };
+        let config = Config {
+            key: vec![0; 32],
+            topic: vec![0; 32],
+            max_send_duration: Duration::from_secs(10),
+        };
         let node = crate::streams::Api::new_in_runtime(config, HandlerMode::Sender).await?;
         let write = node.node_scope();
         let db = node.db();

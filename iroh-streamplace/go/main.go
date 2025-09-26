@@ -35,22 +35,28 @@ func main() {
 	fmt.Println("Starting with tickets", tickets)
 	config := sp.Config {
 		Key : secret,
+		Topic: make([]byte, 32), // all zero topic for testing
+		MaxSendDuration: 1000_000_000, // 1s
 	}
 	fmt.Printf("Config created %+v\n", config)
 	node, err := sp.ApiSender(config)
 	panicIfErr(err)
 
+	db := node.Db()
+	w := node.NodeScope()
+
+	node_id, err := node.NodeId()
+	panicIfErr(err)
+	fmt.Println("Node ID:", node_id)
+
 	ticket, err := node.Ticket()
 	panicIfErr(err)
+	fmt.Println("Ticket:", ticket)
 
-	fmt.Println("db created", ticket)
 	if len(tickets) > 0 {
 		err = node.JoinPeers(tickets)
 		panicIfErr(err)
 	}
-
-	db := node.Db()
-	w := node.NodeScope()
 
 	w.Put(nil, []byte("hello"), []byte("world"))
 	stream := []byte("stream1")

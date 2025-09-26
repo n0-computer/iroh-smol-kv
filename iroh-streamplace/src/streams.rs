@@ -170,13 +170,13 @@ struct Connection {
 impl Actor {
     pub async fn spawn(
         endpoint: iroh::Endpoint,
+        topic: iroh_gossip::proto::TopicId,
         config: iroh_smol_kv::Config,
         handler: HandlerMode,
     ) -> Result<(Api, impl Future<Output = ()>), iroh_gossip::api::ApiError> {
         let (rpc_tx, rpc_rx) = tokio::sync::mpsc::channel::<RpcMessage>(32);
         let (api_tx, api_rx) = tokio::sync::mpsc::channel::<ApiMessage>(32);
         let gossip = Gossip::builder().spawn(endpoint.clone());
-        let topic = TopicId::from_bytes([0; 32]);
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(
@@ -269,16 +269,18 @@ impl Actor {
                     ..
                 } = sub;
                 if let Some(e) = self.subscriptions.get_mut(&key)
-                    && !e.remove(&remote_id) {
-                        warn!(
-                            "unsubscribe: no subscription for {} from {}",
-                            key, remote_id
-                        );
-                    }
+                    && !e.remove(&remote_id)
+                {
+                    warn!(
+                        "unsubscribe: no subscription for {} from {}",
+                        key, remote_id
+                    );
+                }
                 if let Some(subscriptions) = self.subscriptions.get(&key)
-                    && subscriptions.is_empty() {
-                        self.subscriptions.remove(&key);
-                    }
+                    && subscriptions.is_empty()
+                {
+                    self.subscriptions.remove(&key);
+                }
                 self.update_subscriptions(&key).await;
                 tx.send(()).await.ok();
             }
@@ -441,6 +443,11 @@ impl Api {
                 size: e.len() as u64,
             }
         })?);
+        let topic = TopicId::from_bytes(<[u8; 32]>::try_from(config.topic).map_err(|e| {
+            CreateError::Topic {
+                size: e.len() as u64,
+            }
+        })?);
         let endpoint = iroh::Endpoint::builder()
             .secret_key(secret_key)
             .bind()
@@ -448,12 +455,11 @@ impl Api {
             .map_err(|e| CreateError::Bind {
                 message: e.to_string(),
             })?;
-        let (api, actor) = Actor::spawn(endpoint, Default::default(), handler)
+        let (api, actor) = Actor::spawn(endpoint, topic, Default::default(), handler)
             .await
             .map_err(|e| CreateError::Subscribe {
                 message: e.to_string(),
             })?;
-        println!("Spawning actor");
         tokio::spawn(actor);
         Ok(Arc::new(api))
     }

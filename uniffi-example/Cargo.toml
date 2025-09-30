@@ -1,10 +1,10 @@
 [package]
 name = "uniffi-example"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-iroh-smol-kv-uniffi = { version = "0.1", path = "../iroh-smol-kv-uniffi" }
+iroh-smol-kv-uniffi = { version = "0.2.0", path = "../iroh-smol-kv-uniffi" }
 bytes = "1"
 iroh = "0.92"
 iroh-gossip = "0.92"
@@ -13,7 +13,7 @@ n0-future = "0.2"
 snafu = "0.8"
 tokio = "1.47"
 uniffi = "0.28"
-iroh-smol-kv = { version = "0.1", path = ".." }
+iroh-smol-kv = { version = "0.2.0", path = ".." }
 
 rand = "0.8.5"
 iroh-base = "0.92"

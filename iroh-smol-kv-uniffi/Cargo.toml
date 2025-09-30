@@ -1,6 +1,6 @@
 [package]
 name = "iroh-smol-kv-uniffi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["rklaehn <rklaehn@protonmail.com>", "n0 team"]
@@ -20,4 +20,4 @@ n0-future = "0.2.0"
 snafu = "0.8.9"
 tokio = "1.47.1"
 uniffi = "0.28.3"
-iroh-smol-kv = { version = "0.1.0", path = ".." }
+iroh-smol-kv = { version = "0.2.0", path = ".." }

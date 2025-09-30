@@ -4,7 +4,8 @@ use std::{
     sync::Arc,
 };
 
-use iroh::{NodeId, PublicKey, SecretKey, Watcher};
+use bytes::Bytes;
+use iroh::{NodeId, PublicKey, RelayMode, SecretKey, Watcher};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use irpc::{WithChannels, rpc::RemoteService};
@@ -116,67 +117,141 @@ mod api {
         GetNodeAddr(GetNodeAddr),
     }
 }
-pub use api::{Message as ApiMessage, Protocol as ApiProtocol};
+use api::{Message as ApiMessage, Protocol as ApiProtocol};
 use n0_future::{FuturesUnordered, StreamExt};
 use rpc::{Message as RpcMessage, Protocol as RpcProtocol};
-use tracing::{debug, trace, warn};
+use snafu::Snafu;
+use tracing::{Instrument, debug, error, trace, trace_span, warn};
 
-use crate::{CreateError, JoinPeersError, PutError};
+use crate::{Config, CreateError, JoinPeersError, PutError, db, streams::rpc::RecvSegment};
 
-pub enum HandlerMode {
+pub(crate) enum HandlerMode {
     Sender,
-    Receiver(Box<dyn Fn(String, Vec<u8>) -> Boxed<()> + Send + Sync + 'static>),
     Forwarder,
+    Receiver(Box<dyn Fn(String, Vec<u8>) -> Boxed<()> + Send + Sync + 'static>),
 }
 
 impl HandlerMode {
-    pub fn receiver_fn(f: impl Fn(String, Vec<u8>) -> Boxed<()> + Send + Sync + 'static) -> Self {
-        Self::Receiver(Box::new(f))
+    pub fn receiver_fn<F, Fut>(f: F) -> Self
+    where
+        F: Fn(String, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        Self::Receiver(Box::new(move |name, data| Box::pin(f(name, data))))
     }
 
     pub fn receiver(handler: Arc<dyn DataHandler>) -> Self {
         Self::receiver_fn(move |id, data| {
             let handler = handler.clone();
-            Box::pin(async move {
+            async move {
                 handler.handle_data(id, data).await;
-            })
+            }
         })
     }
+
+    pub fn mode_str(&self) -> &'static str {
+        match self {
+            HandlerMode::Sender => "sender",
+            HandlerMode::Forwarder => "forwarder",
+            HandlerMode::Receiver(_) => "receiver",
+        }
+    }
 }
+
+type Tasks = FuturesUnordered<Boxed<(NodeId, Result<(), RpcTaskError>)>>;
 
 /// Actor that contains both a kv db for metadata and a handler for the rpc protocol.
 ///
 /// This can be used both for sender and receiver nodes. Sender nodes will just set the
 /// handler to None.
 struct Actor {
-    endpoint: iroh::Endpoint,
+    /// Receiver for rpc messages from remote nodes
     rpc_rx: tokio::sync::mpsc::Receiver<RpcMessage>,
+    /// Receiver for API messages from the user
     api_rx: tokio::sync::mpsc::Receiver<ApiMessage>,
-    subscriptions: BTreeMap<String, BTreeSet<NodeId>>,
-    connections: BTreeMap<NodeId, Connection>,
+    /// nodes I need to send to for each stream
+    subscribers: BTreeMap<String, BTreeSet<NodeId>>,
+    /// nodes I am subscribed to
+    subscriptions: BTreeMap<String, NodeId>,
+    /// lightweight typed connection pool
+    connections: ConnectionPool,
+    /// How to handle incoming data
     handler: HandlerMode,
+    /// Iroh protocol router, I need to keep it around to keep the protocol alive
     router: iroh::protocol::Router,
-    client: crate::Client,
-    write: crate::WriteScope,
-    tasks: FuturesUnordered<Boxed<()>>,
+    /// Metadata db
+    client: db::Db,
+    /// Write scope for this node for the metadata db
+    write: db::WriteScope,
+    /// Ongoing tasks
+    tasks: Tasks,
+    /// Configuration, needed for timeouts etc.
+    config: Arc<crate::Config>,
 }
 
 #[derive(Debug, Clone)]
 struct Connection {
-    _id: NodeId,
+    id: NodeId,
     rpc: irpc::Client<RpcProtocol>,
+}
+
+#[derive(Debug, Snafu)]
+enum RpcTaskError {
+    #[snafu(transparent)]
+    Task { source: irpc::Error },
+    #[snafu(transparent)]
+    Timeout { source: tokio::time::error::Elapsed },
+}
+
+struct ConnectionPool {
+    endpoint: iroh::Endpoint,
+    connections: BTreeMap<NodeId, Connection>,
+}
+
+impl ConnectionPool {
+    fn new(endpoint: iroh::Endpoint) -> Self {
+        Self {
+            endpoint,
+            connections: BTreeMap::new(),
+        }
+    }
+
+    /// Cheap conn pool hack
+    fn get(&mut self, remote: &NodeId) -> Connection {
+        if !self.connections.contains_key(remote) {
+            let conn = IrohRemoteConnection::new(
+                self.endpoint.clone(),
+                (*remote).into(),
+                rpc::ALPN.to_vec(),
+            );
+            let conn = Connection {
+                rpc: irpc::Client::boxed(conn),
+                id: *remote,
+            };
+            self.connections.insert(*remote, conn);
+        }
+        self.connections
+            .get_mut(remote)
+            .expect("just inserted")
+            .clone()
+    }
+
+    fn remove(&mut self, remote: &NodeId) {
+        self.connections.remove(remote);
+    }
 }
 
 impl Actor {
     pub async fn spawn(
         endpoint: iroh::Endpoint,
         topic: iroh_gossip::proto::TopicId,
-        config: iroh_smol_kv::Config,
+        config: crate::Config,
         handler: HandlerMode,
-    ) -> Result<(Api, impl Future<Output = ()>), iroh_gossip::api::ApiError> {
+    ) -> Result<(Node, impl Future<Output = ()>), iroh_gossip::api::ApiError> {
         let (rpc_tx, rpc_rx) = tokio::sync::mpsc::channel::<RpcMessage>(32);
         let (api_tx, api_rx) = tokio::sync::mpsc::channel::<ApiMessage>(32);
         let gossip = Gossip::builder().spawn(endpoint.clone());
+        let id = endpoint.node_id();
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(
@@ -186,27 +261,34 @@ impl Actor {
             .spawn();
         let topic = gossip.subscribe(topic, vec![]).await?;
         let secret = router.endpoint().secret_key().clone();
-        let client = iroh_smol_kv::Client::local(topic, config);
-        let write = crate::WriteScope::new(client.write(secret.clone()));
-        let client = crate::Client::new(client);
+        let db_config = Default::default();
+        let client = iroh_smol_kv::Client::local(topic, db_config);
+        let write = db::WriteScope::new(client.write(secret.clone()));
+        let client = db::Db::new(client);
         let actor = Self {
-            endpoint: endpoint.clone(),
             rpc_rx,
             api_rx,
+            subscribers: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
-            connections: BTreeMap::new(),
+            connections: ConnectionPool::new(router.endpoint().clone()),
             handler,
             router,
             write: write.clone(),
             client: client.clone(),
             tasks: FuturesUnordered::new(),
+            config: Arc::new(config),
         };
-        let api = Api {
+        let api = Node {
             client: Arc::new(client),
             write: Arc::new(write),
             api: irpc::Client::local(api_tx),
         };
-        Ok((api, actor.run()))
+        Ok((
+            api,
+            actor
+                .run()
+                .instrument(trace_span!("actor", id=%id.fmt_short())),
+        ))
     }
 
     async fn run(mut self) {
@@ -214,32 +296,46 @@ impl Actor {
             tokio::select! {
                 msg = self.rpc_rx.recv() => {
                     let Some(msg) = msg else {
+                        error!("rpc channel closed");
                         break;
                     };
-                    self.handle_rpc(msg).await;
+                    self.handle_rpc(msg).instrument(trace_span!("rpc")).await;
                 }
                 msg = self.api_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
                     };
-                    self.handle_api(msg).await;
+                    self.handle_api(msg).instrument(trace_span!("api")).await;
                 }
-                _ = self.tasks.next(), if !self.tasks.is_empty() => {
-                    // task completed
+                res = self.tasks.next(), if !self.tasks.is_empty() => {
+                    let Some((remote_id, res)) = res else {
+                        error!("task finished but no result");
+                        break;
+                    };
+                    match res {
+                        Ok(()) => {}
+                        Err(RpcTaskError::Timeout { source }) => {
+                            warn!("call to {remote_id} timed out: {source}");
+                        }
+                        Err(RpcTaskError::Task { source }) => {
+                            warn!("call to {remote_id} failed: {source}");
+                        }
+                    }
+                    self.connections.remove(&remote_id);
                 }
             }
         }
     }
 
-    async fn update_subscriptions(&mut self, key: &str) {
+    async fn update_subscriber_meta(&mut self, key: &str) {
         let n = self
-            .subscriptions
+            .subscribers
             .get(key)
             .map(|s| s.len())
             .unwrap_or_default();
-        let v = if n > 0 { b"t".to_vec() } else { b"f".to_vec() };
+        let v = n.to_string().into_bytes();
         self.write
-            .put_impl(Some(key.as_bytes().to_vec()), b"s", v.into())
+            .put_impl(Some(key.as_bytes().to_vec()), b"subscribers", v.into())
             .await
             .ok();
     }
@@ -247,28 +343,28 @@ impl Actor {
     /// Requests from remote nodes
     async fn handle_rpc(&mut self, msg: RpcMessage) {
         match msg {
-            RpcMessage::Subscribe(sub) => {
-                debug!("subscribe {:?}", sub);
+            RpcMessage::Subscribe(msg) => {
+                trace!("{:?}", msg.inner);
                 let WithChannels {
                     tx,
                     inner: rpc::Subscribe { key, remote_id },
                     ..
-                } = sub;
-                self.subscriptions
+                } = msg;
+                self.subscribers
                     .entry(key.clone())
                     .or_default()
                     .insert(remote_id);
-                self.update_subscriptions(&key).await;
+                self.update_subscriber_meta(&key).await;
                 tx.send(()).await.ok();
             }
-            RpcMessage::Unsubscribe(sub) => {
-                debug!("unsubscribe {:?}", sub);
+            RpcMessage::Unsubscribe(msg) => {
+                debug!("{:?}", msg.inner);
                 let WithChannels {
                     tx,
                     inner: rpc::Unsubscribe { key, remote_id },
                     ..
-                } = sub;
-                if let Some(e) = self.subscriptions.get_mut(&key)
+                } = msg;
+                if let Some(e) = self.subscribers.get_mut(&key)
                     && !e.remove(&remote_id)
                 {
                     warn!(
@@ -276,27 +372,38 @@ impl Actor {
                         key, remote_id
                     );
                 }
-                if let Some(subscriptions) = self.subscriptions.get(&key)
+                if let Some(subscriptions) = self.subscribers.get(&key)
                     && subscriptions.is_empty()
                 {
-                    self.subscriptions.remove(&key);
+                    self.subscribers.remove(&key);
                 }
-                self.update_subscriptions(&key).await;
+                self.update_subscriber_meta(&key).await;
                 tx.send(()).await.ok();
             }
-            RpcMessage::RecvSegment(segment) => {
-                debug!("recv segment {:?}", segment);
+            RpcMessage::RecvSegment(msg) => {
+                trace!("{:?}", msg.inner);
                 let WithChannels {
                     tx,
                     inner: rpc::RecvSegment { key, data },
                     ..
-                } = segment;
+                } = msg;
                 match &self.handler {
                     HandlerMode::Sender => {
                         warn!("received segment but in sender mode");
                     }
                     HandlerMode::Forwarder => {
-                        todo!()
+                        if let Some(remotes) = self.subscribers.get(&key) {
+                            Self::handle_send(
+                                &mut self.tasks,
+                                &mut self.connections,
+                                &self.config,
+                                key,
+                                data,
+                                remotes,
+                            );
+                        } else {
+                            trace!("no subscribers for stream {}", key);
+                        }
                     }
                     HandlerMode::Receiver(handler) => {
                         if self.subscriptions.contains_key(&key) {
@@ -320,27 +427,18 @@ impl Actor {
                     inner: api::SendSegment { key, data },
                     ..
                 } = msg;
-                let msg = rpc::RecvSegment {
-                    key: key.clone(),
-                    data: data.clone(),
-                };
-
-                if let Some(remotes) = self.subscriptions.get(&key) {
-                    for remote in remotes {
-                        debug!("sending to topic {}: {}", key, remote);
-
-                        let conn =
-                            Self::get_connection(&self.endpoint, &mut self.connections, remote);
-                        // todo: move to tasks
-                        // todo: send timeout
-                        if let Err(err) = conn.rpc.rpc(msg.clone()).await {
-                            warn!("failed to send to {}: {:?}", remote, err);
-                            // remove conn
-                            self.connections.remove(remote);
-                        }
-                    }
+                if let Some(remotes) = self.subscribers.get(&key) {
+                    Self::handle_send(
+                        &mut self.tasks,
+                        &mut self.connections,
+                        &self.config,
+                        key,
+                        data,
+                        remotes,
+                    );
+                } else {
+                    trace!("no subscribers for stream {}", key);
                 }
-
                 tx.send(()).await.ok();
             }
             ApiMessage::Subscribe(msg) => {
@@ -350,14 +448,15 @@ impl Actor {
                     inner: api::Subscribe { key, remote_id },
                     ..
                 } = msg;
-                let conn = Self::get_connection(&self.endpoint, &mut self.connections, &remote_id);
+                let conn = self.connections.get(&remote_id);
                 conn.rpc
                     .rpc(rpc::Subscribe {
-                        key,
+                        key: key.clone(),
                         remote_id: self.node_id(),
                     })
                     .await
                     .ok();
+                self.subscriptions.insert(key, remote_id);
                 tx.send(()).await.ok();
             }
             ApiMessage::Unsubscribe(msg) => {
@@ -367,15 +466,15 @@ impl Actor {
                     inner: api::Unsubscribe { key, remote_id },
                     ..
                 } = msg;
-                if let Some(conn) = self.connections.get(&remote_id) {
-                    conn.rpc
-                        .rpc(rpc::Unsubscribe {
-                            key,
-                            remote_id: self.node_id(),
-                        })
-                        .await
-                        .ok();
-                }
+                let conn = self.connections.get(&remote_id);
+                conn.rpc
+                    .rpc(rpc::Unsubscribe {
+                        key: key.clone(),
+                        remote_id: self.node_id(),
+                    })
+                    .await
+                    .ok();
+                self.subscriptions.remove(&key);
                 tx.send(()).await.ok();
             }
             ApiMessage::JoinPeers(msg) => {
@@ -385,7 +484,9 @@ impl Actor {
                     inner: api::JoinPeers { peers },
                     ..
                 } = msg;
-                let ids = peers.iter().map(|a| a.node_id).collect::<HashSet<_>>();
+                let ids = peers.iter().map(|a| a.node_id)
+                    .filter(|id| *id != self.node_id())
+                    .collect::<HashSet<_>>();
                 for addr in &peers {
                     self.router.endpoint().add_node_addr(addr.clone()).ok();
                 }
@@ -395,75 +496,109 @@ impl Actor {
             ApiMessage::GetNodeAddr(msg) => {
                 trace!("{:?}", msg.inner);
                 let WithChannels { tx, .. } = msg;
-                self.router.endpoint().home_relay().initialized().await;
+                if !self.config.disable_relay {
+                    // don't await home relay if we have disabled relays, this will hang forever
+                    self.router.endpoint().home_relay().initialized().await;
+                }
                 let addr = self.router.endpoint().node_addr().initialized().await;
                 tx.send(addr).await.ok();
             }
         }
     }
 
-    /// Cheap conn pool hack
-    fn get_connection(
-        endpoint: &iroh::Endpoint,
-        connections: &mut BTreeMap<NodeId, Connection>,
-        remote: &NodeId,
-    ) -> Connection {
-        if !connections.contains_key(remote) {
-            let conn =
-                IrohRemoteConnection::new(endpoint.clone(), (*remote).into(), rpc::ALPN.to_vec());
-
-            let conn = Connection {
-                rpc: irpc::Client::boxed(conn),
-                _id: *remote,
-            };
-            connections.insert(*remote, conn);
+    fn handle_send(
+        tasks: &mut Tasks,
+        connections: &mut ConnectionPool,
+        config: &Arc<Config>,
+        key: String,
+        data: Bytes,
+        remotes: &BTreeSet<NodeId>,
+    ) {
+        let msg = rpc::RecvSegment { key, data };
+        for remote in remotes {
+            trace!("sending to stream {}: {}", msg.key, remote);
+            let conn = connections.get(&remote);
+            tasks.push(Box::pin(Self::forward_task(
+                config.clone(),
+                conn,
+                msg.clone(),
+            )));
         }
-        connections.get_mut(remote).expect("just inserted").clone()
+    }
+
+    async fn forward_task(
+        config: Arc<crate::Config>,
+        conn: Connection,
+        msg: RecvSegment,
+    ) -> (NodeId, Result<(), RpcTaskError>) {
+        let id = conn.id;
+        let res = async move {
+            tokio::time::timeout(config.max_send_duration, conn.rpc.rpc(msg)).await??;
+            Ok(())
+        }
+        .await;
+        (id, res)
     }
 
     fn node_id(&self) -> PublicKey {
-        self.endpoint.node_id()
+        self.router.endpoint().node_id()
     }
 }
 
+/// Iroh-streamplace node that can send, forward or receive stream segments.
 #[derive(Clone, uniffi::Object)]
-pub struct Api {
-    client: Arc<crate::Client>,
+pub struct Node {
+    client: Arc<crate::Db>,
     write: Arc<crate::WriteScope>,
     api: irpc::Client<ApiProtocol>,
 }
 
-impl Api {
+impl Node {
     pub(crate) async fn new_in_runtime(
         config: crate::Config,
         handler: HandlerMode,
     ) -> Result<Arc<Self>, CreateError> {
-        let secret_key = SecretKey::from_bytes(&<[u8; 32]>::try_from(config.key).map_err(|e| {
-            CreateError::PrivateKey {
-                size: e.len() as u64,
-            }
-        })?);
-        let topic = TopicId::from_bytes(<[u8; 32]>::try_from(config.topic).map_err(|e| {
-            CreateError::Topic {
-                size: e.len() as u64,
-            }
-        })?);
+        let mode_str = Bytes::from(handler.mode_str());
+        let secret_key =
+            SecretKey::from_bytes(&<[u8; 32]>::try_from(config.key.clone()).map_err(|e| {
+                CreateError::PrivateKey {
+                    size: e.len() as u64,
+                }
+            })?);
+        let topic =
+            TopicId::from_bytes(<[u8; 32]>::try_from(config.topic.clone()).map_err(|e| {
+                CreateError::Topic {
+                    size: e.len() as u64,
+                }
+            })?);
+        let relay_mode = if config.disable_relay {
+            RelayMode::Disabled
+        } else {
+            RelayMode::Default
+        };
         let endpoint = iroh::Endpoint::builder()
             .secret_key(secret_key)
+            .relay_mode(relay_mode)
             .bind()
             .await
             .map_err(|e| CreateError::Bind {
                 message: e.to_string(),
             })?;
-        let (api, actor) = Actor::spawn(endpoint, topic, Default::default(), handler)
+        let (api, actor) = Actor::spawn(endpoint, topic, config, handler)
             .await
             .map_err(|e| CreateError::Subscribe {
                 message: e.to_string(),
             })?;
+        api.node_scope()
+            .put_impl(Option::<Vec<u8>>::None, b"mode", mode_str)
+            .await
+            .ok();
         tokio::spawn(actor);
         Ok(Arc::new(api))
     }
 }
+
+/// DataHandler trait that is exported to go for receiving data callbacks.
 #[uniffi::export(with_foreign)]
 #[async_trait::async_trait]
 pub trait DataHandler: Send + Sync {
@@ -471,11 +606,16 @@ pub trait DataHandler: Send + Sync {
 }
 
 #[uniffi::export]
-impl Api {
+impl Node {
     /// Create a new streamplace client node.
     #[uniffi::constructor]
     pub async fn sender(config: crate::Config) -> Result<Arc<Self>, CreateError> {
         crate::RUNTIME.block_on(Self::new_in_runtime(config, HandlerMode::Sender))
+    }
+
+    #[uniffi::constructor]
+    pub async fn forwarder(config: crate::Config) -> Result<Arc<Self>, CreateError> {
+        crate::RUNTIME.block_on(Self::new_in_runtime(config, HandlerMode::Forwarder))
     }
 
     #[uniffi::constructor]
@@ -487,7 +627,7 @@ impl Api {
     }
 
     /// Get a handle to the db to watch for changes locally or globally.
-    pub fn db(&self) -> Arc<crate::Client> {
+    pub fn db(&self) -> Arc<crate::Db> {
         self.client.clone()
     }
 

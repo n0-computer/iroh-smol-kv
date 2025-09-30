@@ -87,6 +87,7 @@ async fn main() -> n0_snafu::Result<()> {
     let key = SecretKey::generate(&mut rng);
     let node_id = key.public();
     let endpoint = iroh::Endpoint::builder()
+        .discovery_n0()
         .secret_key(key.clone())
         .bind()
         .await

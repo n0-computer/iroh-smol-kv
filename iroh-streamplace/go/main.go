@@ -39,7 +39,7 @@ func main() {
 		MaxSendDuration: 1000_000_000, // 1s
 	}
 	fmt.Printf("Config created %+v\n", config)
-	node, err := sp.ApiSender(config)
+	node, err := sp.NodeSender(config)
 	panicIfErr(err)
 
 	db := node.Db()

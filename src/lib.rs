@@ -178,6 +178,9 @@ pub(crate) struct JoinPeers {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Shutdown;
+
+#[derive(Debug, Serialize, Deserialize)]
 #[rpc_requests(message = Message)]
 enum Proto {
     #[rpc(tx = oneshot::Sender<()>)]
@@ -188,6 +191,8 @@ enum Proto {
     Subscribe(Subscribe),
     #[rpc(tx = oneshot::Sender<()>)]
     JoinPeers(JoinPeers),
+    #[rpc(tx = oneshot::Sender<()>)]
+    Shutdown(Shutdown),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,6 +475,11 @@ impl Client {
             peers: peers.into_iter().collect(),
         };
         self.0.rpc(peers)
+    }
+
+    pub async fn shutdown(&self) -> Result<(), irpc::Error> {
+        let _ = self.0.rpc(Shutdown).await?;
+        Ok(())
     }
 }
 
@@ -768,6 +778,10 @@ impl Actor {
                                 error!("Error joining peers: {:?}", e);
                                 break;
                             }
+                        }
+                        Message::Shutdown(msg) => {
+                            msg.tx.send(()).await.ok();
+                            break;
                         }
                     }
                 }

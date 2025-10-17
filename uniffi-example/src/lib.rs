@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use iroh::{SecretKey, Watcher};
+use iroh::{discovery::static_provider::StaticProvider, SecretKey};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use snafu::Snafu;
@@ -17,6 +17,7 @@ mod kv {
 #[uniffi::export(Debug)]
 pub struct Db {
     router: iroh::protocol::Router,
+    sp: StaticProvider,
     client: Arc<kv::Client>,
 }
 
@@ -75,7 +76,7 @@ impl Db {
             .map(|k| Arc::new(k.node_addr().node_id.into()))
             .collect::<Vec<_>>();
         for ticket in keys {
-            sp.add_node_info(ticket.node_addr().clone());
+            self.sp.add_node_info(ticket.node_addr().clone());
         }
         self.client.join_peers(ids).await?;
         Ok(())
@@ -103,8 +104,10 @@ impl Db {
             .init();
         let key = SecretKey::generate(&mut rand::rng());
         let node_id = key.public();
+        let sp = StaticProvider::new();
         let endpoint = iroh::Endpoint::builder()
             .secret_key(key.clone())
+            .discovery(sp.clone())
             .bind()
             .await
             .map_err(|e| CreateError::Bind {
@@ -129,6 +132,7 @@ impl Db {
         let api = kv::Client::local(topic, config);
         Ok(Arc::new(Self {
             router,
+            sp,
             client: Arc::new(api),
         }))
     }

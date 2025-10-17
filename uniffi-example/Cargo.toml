@@ -15,8 +15,8 @@ tokio = "1.47"
 uniffi = "0.28"
 iroh-smol-kv = { version = "0.3.0", path = ".." }
 
-rand = "0.8.5"
-iroh-base = "0.92"
+rand = "0.9"
+iroh-base = "0.93"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
 [build-dependencies]

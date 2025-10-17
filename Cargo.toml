@@ -1,6 +1,6 @@
 [package]
 name = "iroh-smol-kv"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A tiny replicated kv store that sync over an iroh-gossip topic"
 license = "MIT OR Apache-2.0"

@@ -85,7 +85,7 @@ impl PublicKey {
     /// Convert to a base32 string limited to the first 10 bytes for a friendly string
     /// representation of the key.
     pub fn fmt_short(&self) -> String {
-        iroh::PublicKey::from(self).fmt_short()
+        iroh::PublicKey::from(self).fmt_short().to_string()
     }
 }
 

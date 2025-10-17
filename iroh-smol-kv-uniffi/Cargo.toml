@@ -13,8 +13,8 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 bytes = "1"
-iroh = "0.92"
-iroh-gossip = "0.92"
+iroh = "0.93"
+iroh-gossip = "0.93"
 irpc = "0.8.0"
 n0-future = "0.2.0"
 snafu = "0.8.9"

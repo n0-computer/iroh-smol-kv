@@ -13,7 +13,7 @@ n0-future = "0.2"
 snafu = "0.8"
 tokio = "1.47"
 uniffi = "0.28"
-iroh-smol-kv = { version = "0.3.0", path = ".." }
+iroh-smol-kv = { version = "0.3.1", path = ".." }
 
 rand = "0.9"
 iroh-base = "0.93"

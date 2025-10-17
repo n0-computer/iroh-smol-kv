@@ -648,9 +648,8 @@ impl Actor {
             snapshot.flatten().count(),
             total
         );
-        let mut rng = rand::rngs::OsRng;
         let mut to_publish = snapshot.flatten().collect::<Vec<_>>();
-        to_publish.shuffle(&mut rng);
+        to_publish.shuffle(&mut rand::rng());
         let n = to_publish.len();
         if n == 0 {
             tokio::time::sleep(total).await;

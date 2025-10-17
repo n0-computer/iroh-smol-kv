@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use bytes::Bytes;
 use clap::Parser;
-use iroh::{PublicKey, SecretKey, Watcher};
+use iroh::{PublicKey, SecretKey, discovery::static_provider::StaticProvider};
 use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
@@ -83,20 +83,21 @@ async fn handle_subscription(id: usize, sub: SubscribeResponse) {
 async fn main() -> n0_snafu::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let mut rng = rand::rngs::OsRng;
-    let key = SecretKey::generate(&mut rng);
+    let key = SecretKey::generate(&mut rand::rng());
     let node_id = key.public();
+    let sp = StaticProvider::new();
     let endpoint = iroh::Endpoint::builder()
         .discovery_n0()
+        .add_discovery(sp.clone())
         .secret_key(key.clone())
         .bind()
         .await
         .e()?;
-    let _ = endpoint.home_relay().initialized().await;
-    let addr = endpoint.node_addr().initialized().await;
+    let _ = endpoint.online().await;
+    let addr = endpoint.node_addr();
     let ticket = NodeTicket::from(addr);
     for bootstrap in &args.bootstrap {
-        endpoint.add_node_addr(bootstrap.node_addr().clone()).ok();
+        sp.add_node_info(bootstrap.node_addr().clone());
     }
     let bootstrap_ids = args
         .bootstrap
@@ -108,7 +109,7 @@ async fn main() -> n0_snafu::Result<()> {
     println!("Ticket: {ticket}");
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let topic = TopicId::from_bytes([0; 32]);
-    let router = iroh::protocol::Router::builder(endpoint)
+    let _router = iroh::protocol::Router::builder(endpoint)
         .accept(iroh_gossip::ALPN, gossip.clone())
         .spawn();
     let topic = if args.bootstrap.is_empty() {
@@ -157,7 +158,7 @@ async fn main() -> n0_snafu::Result<()> {
                     Command::Join { peers } => {
                         let ids = peers.iter().map(|p| p.node_addr().node_id).collect::<Vec<_>>();
                         for addr in peers {
-                            router.endpoint().add_node_addr(addr.node_addr().clone()).ok();
+                            sp.add_node_info(addr.node_addr().clone());
                         }
                         api.join_peers(ids).await.e()?;
                     }

@@ -75,10 +75,7 @@ impl Db {
             .map(|k| Arc::new(k.node_addr().node_id.into()))
             .collect::<Vec<_>>();
         for ticket in keys {
-            self.router
-                .endpoint()
-                .add_node_addr(ticket.node_addr().clone())
-                .ok();
+            sp.add_node_info(ticket.node_addr().clone());
         }
         self.client.join_peers(ids).await?;
         Ok(())
@@ -104,8 +101,7 @@ impl Db {
             .with_thread_ids(true)
             .with_thread_names(true)
             .init();
-        let mut rng = rand::rngs::OsRng;
-        let key = SecretKey::generate(&mut rng);
+        let key = SecretKey::generate(&mut rand::rng());
         let node_id = key.public();
         let endpoint = iroh::Endpoint::builder()
             .secret_key(key.clone())
@@ -114,8 +110,8 @@ impl Db {
             .map_err(|e| CreateError::Bind {
                 message: e.to_string(),
             })?;
-        let _ = endpoint.home_relay().initialized().await;
-        let addr = endpoint.node_addr().initialized().await;
+        let _ = endpoint.online().await;
+        let addr = endpoint.node_addr();
         let ticket = NodeTicket::from(addr);
         println!("Node ID: {node_id}");
         println!("Ticket: {ticket}");

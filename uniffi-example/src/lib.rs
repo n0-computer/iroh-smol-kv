@@ -5,7 +5,7 @@ use std::{
 };
 
 use iroh::{discovery::static_provider::StaticProvider, SecretKey};
-use iroh_base::ticket::NodeTicket;
+use iroh_base::ticket::EndpointTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use snafu::Snafu;
 
@@ -64,9 +64,9 @@ impl Db {
     }
 
     pub async fn join_peers(&self, peers: Vec<String>) -> Result<(), DbJoinPeersError> {
-        let keys: Vec<NodeTicket> = peers
+        let keys: Vec<EndpointTicket> = peers
             .into_iter()
-            .map(|s| NodeTicket::from_str(&s))
+            .map(|s| EndpointTicket::from_str(&s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| DbJoinPeersError::Ticket {
                 message: e.to_string(),
@@ -115,8 +115,8 @@ impl Db {
             })?;
         let _ = endpoint.online().await;
         let addr = endpoint.node_addr();
-        let ticket = NodeTicket::from(addr);
-        println!("Node ID: {node_id}");
+        let ticket = EndpointTicket::from(addr);
+        println!("Endpoint ID: {node_id}");
         println!("Ticket: {ticket}");
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = TopicId::from_bytes([0; 32]);

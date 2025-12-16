@@ -22,18 +22,18 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use iroh::{NodeId, PublicKey, SecretKey};
+use iroh::{EndpointId, PublicKey, SecretKey, Signature};
 use iroh_gossip::api::{Event, GossipReceiver, GossipSender, GossipTopic};
 use irpc::{
     channel::{mpsc, oneshot},
     rpc_requests,
 };
+use n0_error::stack_error;
 use n0_future::{FuturesUnordered, StreamExt, TryFutureExt, TryStreamExt, boxed::BoxFuture};
 pub use proto::SignedValue;
 use proto::{GossipMessage, SigningData};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use snafu::Snafu;
 use sync_wrapper::SyncStream;
 use tokio::sync::broadcast;
 use tracing::{error, trace};
@@ -91,15 +91,11 @@ pub mod proto {
     }
 }
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
-#[snafu(module)]
+#[stack_error(derive, add_meta, from_sources)]
 pub enum InsertError {
-    #[snafu(transparent)]
-    Signature {
-        source: ed25519_dalek::SignatureError,
-    },
-    #[snafu(display("Value too old: existing timestamp {}, new timestamp {}", old, new))]
+    #[error(transparent)]
+    Signature { source: iroh::SignatureError },
+    #[error("Value too old: existing timestamp {}, new timestamp {}", old, new)]
     ValueTooOld { old: u64, new: u64 },
 }
 
@@ -174,7 +170,7 @@ pub struct Subscribe {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct JoinPeers {
-    pub peers: Vec<NodeId>,
+    pub peers: Vec<EndpointId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -469,7 +465,7 @@ impl Client {
 
     pub fn join_peers(
         &self,
-        peers: impl IntoIterator<Item = NodeId>,
+        peers: impl IntoIterator<Item = EndpointId>,
     ) -> impl n0_future::Future<Output = Result<(), irpc::Error>> {
         let peers = JoinPeers {
             peers: peers.into_iter().collect(),
@@ -509,7 +505,7 @@ impl State {
             value: &value.value,
         };
         let signing_data_bytes = postcard::to_stdvec(&signing_data).expect("signing data to vec");
-        let signature = ed25519_dalek::Signature::from_bytes(&value.signature);
+        let signature = Signature::from_bytes(&value.signature);
         scope.verify(&signing_data_bytes, &signature)?;
         self.insert_signed_value_unverified(scope, key, value)
     }
@@ -528,11 +524,10 @@ impl State {
         };
         match per_node.get_mut(&key) {
             Some(existing) if existing.timestamp >= value.timestamp => {
-                return Err(insert_error::ValueTooOldSnafu {
+                n0_error::bail!(InsertError::ValueTooOld {
                     old: existing.timestamp,
                     new: value.timestamp,
-                }
-                .build());
+                });
             }
             _ => {
                 per_node.insert_mut(key, value);

@@ -4,9 +4,9 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use iroh::{discovery::static_provider::StaticProvider, SecretKey};
-use iroh_base::ticket::NodeTicket;
+use iroh::{SecretKey, discovery::static_provider::StaticProvider};
 use iroh_gossip::{net::Gossip, proto::TopicId};
+use iroh_tickets::endpoint::EndpointTicket;
 use snafu::Snafu;
 
 mod kv {
@@ -24,7 +24,7 @@ pub struct Db {
 impl fmt::Debug for Db {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Db")
-            .field("id", &self.router.endpoint().node_id())
+            .field("id", &self.router.endpoint().id())
             .finish_non_exhaustive()
     }
 }
@@ -64,19 +64,19 @@ impl Db {
     }
 
     pub async fn join_peers(&self, peers: Vec<String>) -> Result<(), DbJoinPeersError> {
-        let keys: Vec<NodeTicket> = peers
+        let keys: Vec<EndpointTicket> = peers
             .into_iter()
-            .map(|s| NodeTicket::from_str(&s))
+            .map(|s| EndpointTicket::from_str(&s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| DbJoinPeersError::Ticket {
                 message: e.to_string(),
             })?;
         let ids = keys
             .iter()
-            .map(|k| Arc::new(k.node_addr().node_id.into()))
+            .map(|k| Arc::new(k.endpoint_addr().id.into()))
             .collect::<Vec<_>>();
         for ticket in keys {
-            self.sp.add_node_info(ticket.node_addr().clone());
+            self.sp.add_endpoint_info(ticket.endpoint_addr().clone());
         }
         self.client.join_peers(ids).await?;
         Ok(())
@@ -91,7 +91,7 @@ impl Db {
     }
 
     pub fn public(&self) -> Arc<kv::PublicKey> {
-        Arc::new(self.router.endpoint().node_id().into())
+        Arc::new(self.router.endpoint().id().into())
     }
 }
 
@@ -103,7 +103,7 @@ impl Db {
             .with_thread_names(true)
             .init();
         let key = SecretKey::generate(&mut rand::rng());
-        let node_id = key.public();
+        let endpoint_id = key.public();
         let sp = StaticProvider::new();
         let endpoint = iroh::Endpoint::builder()
             .secret_key(key.clone())
@@ -114,9 +114,9 @@ impl Db {
                 message: e.to_string(),
             })?;
         let _ = endpoint.online().await;
-        let addr = endpoint.node_addr();
-        let ticket = NodeTicket::from(addr);
-        println!("Node ID: {node_id}");
+        let addr = endpoint.addr();
+        let ticket = EndpointTicket::from(addr);
+        println!("Endpoint ID: {endpoint_id}");
         println!("Ticket: {ticket}");
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = TopicId::from_bytes([0; 32]);

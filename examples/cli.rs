@@ -3,14 +3,14 @@ use std::{collections::BTreeMap, str::FromStr};
 use bytes::Bytes;
 use clap::Parser;
 use iroh::{PublicKey, SecretKey, discovery::static_provider::StaticProvider};
-use iroh_base::ticket::NodeTicket;
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
     Client, Config, Filter, Subscribe, SubscribeItem, SubscribeMode, SubscribeResponse,
     util::format_bytes,
 };
+use iroh_tickets::endpoint::EndpointTicket;
+use n0_error::{Result, StdResultExt};
 use n0_future::{StreamExt, task::AbortOnDropHandle};
-use n0_snafu::ResultExt;
 use tokio::{
     io::{self, AsyncBufReadExt, BufReader},
     signal,
@@ -18,7 +18,7 @@ use tokio::{
 
 #[derive(Debug, Parser)]
 struct Args {
-    bootstrap: Vec<NodeTicket>,
+    bootstrap: Vec<EndpointTicket>,
 }
 
 #[derive(Debug)]
@@ -31,7 +31,7 @@ enum Command {
         key: Bytes,
     },
     /// /peers node_ticket*
-    Join { peers: Vec<NodeTicket> },
+    Join { peers: Vec<EndpointTicket> },
     /// /iter
     Iter { filter: Filter },
     /// /subscribe
@@ -80,31 +80,29 @@ async fn handle_subscription(id: usize, sub: SubscribeResponse) {
 }
 
 #[tokio::main]
-async fn main() -> n0_snafu::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     let key = SecretKey::generate(&mut rand::rng());
     let node_id = key.public();
     let sp = StaticProvider::new();
     let endpoint = iroh::Endpoint::builder()
-        .discovery_n0()
-        .add_discovery(sp.clone())
+        .discovery(sp.clone())
         .secret_key(key.clone())
         .bind()
-        .await
-        .e()?;
+        .await?;
     let _ = endpoint.online().await;
-    let addr = endpoint.node_addr();
-    let ticket = NodeTicket::from(addr);
+    let addr = endpoint.addr();
+    let ticket = EndpointTicket::from(addr);
     for bootstrap in &args.bootstrap {
-        sp.add_node_info(bootstrap.node_addr().clone());
+        sp.add_endpoint_info(bootstrap.endpoint_addr().clone());
     }
     let bootstrap_ids = args
         .bootstrap
         .iter()
-        .map(|t| t.node_addr().node_id)
+        .map(|t| t.endpoint_addr().id)
         .collect::<Vec<_>>();
-    println!("Node ID: {node_id}");
+    println!("Endpoint ID: {node_id}");
     println!("Bootstrap IDs: {bootstrap_ids:#?}");
     println!("Ticket: {ticket}");
     let gossip = Gossip::builder().spawn(endpoint.clone());
@@ -113,9 +111,9 @@ async fn main() -> n0_snafu::Result<()> {
         .accept(iroh_gossip::ALPN, gossip.clone())
         .spawn();
     let topic = if args.bootstrap.is_empty() {
-        gossip.subscribe(topic, bootstrap_ids).await.e()?
+        gossip.subscribe(topic, bootstrap_ids).await?
     } else {
-        gossip.subscribe_and_join(topic, bootstrap_ids).await.e()?
+        gossip.subscribe_and_join(topic, bootstrap_ids).await?
     };
     println!("Joined the network, you can start issuing commands.");
     let api = Client::local(topic, Config::default());
@@ -142,30 +140,30 @@ async fn main() -> n0_snafu::Result<()> {
             }
             // Read the next line from stdin
             line = lines.next_line() => {
-                let Some(line) = line.e()? else {
+                let Some(line) = line? else {
                     break;
                 };
                 match Command::from_str(&line).unwrap_or(Command::Other { raw: line.clone() }) {
                     Command::Put { key, value } => {
                         println!("Put key: {}, value: {}", format_bytes(&key), format_bytes(&value));
-                        ws.put(key, value).await.e()?;
+                        ws.put(key, value).await.anyerr()?;
                     }
                     Command::Get { scope, key } => {
                         let scope = scope.unwrap_or(node_id);
-                        let res = api.get(scope, key.clone()).await.e()?;
+                        let res = api.get(scope, key.clone()).await?;
                         println!("Get key: {} {}, value: {:?}", scope.fmt_short(), format_bytes(&key), res);
                     }
                     Command::Join { peers } => {
-                        let ids = peers.iter().map(|p| p.node_addr().node_id).collect::<Vec<_>>();
+                        let ids = peers.iter().map(|p| p.endpoint_addr().id).collect::<Vec<_>>();
                         for addr in peers {
-                            sp.add_node_info(addr.node_addr().clone());
+                            sp.add_endpoint_info(addr.endpoint_addr().clone());
                         }
-                        api.join_peers(ids).await.e()?;
+                        api.join_peers(ids).await?;
                     }
                     Command::Iter { filter } => {
                         let id = next_op_id();
                         println!("#{id} Iter {filter}");
-                        let items = api.iter_with_opts(filter).collect::<Vec<_>>().await.e()?;
+                        let items = api.iter_with_opts(filter).collect::<Vec<_>>().await?;
                         for (s, k, v) in items {
                             println!("#{id} ({},{},{})", s.fmt_short(), format_bytes(&k), format_bytes(&v));
                         }
@@ -220,7 +218,7 @@ Filter syntax:
 
     Timestamp filters:
         time=2023-01-01T00:00:00Z.. // open time range
-    
+
     Scope filters:
         scope={{76dbdc2a2fbeace1986f7c48e33963c08086fc980ff6bd84070cf98887df6b8d}} // comma separated list of public keys
 
@@ -245,8 +243,8 @@ mod command_parser {
 
     use bytes::Bytes;
     use iroh::PublicKey;
-    use iroh_base::ticket::NodeTicket;
     use iroh_smol_kv::Filter;
+    use iroh_tickets::endpoint::EndpointTicket;
 
     use super::Command;
 
@@ -340,9 +338,9 @@ mod command_parser {
                         .map_err(|_| "invalid hex")
                 }
 
-            rule peer_ticket() -> NodeTicket
+            rule peer_ticket() -> EndpointTicket
                 = s:$([^ ' ' | '\t' | '\n' | '\r']+) {?
-                    NodeTicket::from_str(s).map_err(|_| "invalid node ticket")
+                    EndpointTicket::from_str(s).map_err(|_| "invalid node ticket")
                 }
 
             rule public_key() -> PublicKey

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use clap::Parser;
-use iroh::{SecretKey, discovery::static_provider::StaticProvider};
+use iroh::{SecretKey, address_lookup::MemoryLookup, endpoint::presets};
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{Client, Config};
 use iroh_tickets::endpoint::EndpointTicket;
@@ -21,10 +21,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let key = SecretKey::generate(&mut rand::rng());
     let node_id = key.public();
-    let sp = StaticProvider::new();
-    let endpoint = iroh::Endpoint::builder()
+    let sp = MemoryLookup::new();
+    let endpoint = iroh::Endpoint::builder(presets::N0)
         .secret_key(key.clone())
-        .discovery(sp.clone())
+        .address_lookup(sp.clone())
         .bind()
         .await?;
     let _ = endpoint.online().await;

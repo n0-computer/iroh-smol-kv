@@ -40,13 +40,14 @@ default = ["filter-parser"]
 clap = { version = "4.5.47", features = ["derive"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 iroh-tickets = { workspace = true }
+iroh = { workspace = true  }
 tokio = { version = "1.47.1", features = ["signal"] }
 
 [workspace]
 members = ["uniffi-example", "iroh-smol-kv-uniffi"]
 
 [workspace.dependencies]
-iroh = "0.97.0"
+iroh = { version = "0.97.0", default-features = false }
 iroh-gossip = "0.97.0"
 iroh-tickets = "0.4.0"
 irpc = "0.13.0"

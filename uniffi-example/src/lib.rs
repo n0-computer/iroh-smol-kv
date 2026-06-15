@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use iroh::{SecretKey, discovery::static_provider::StaticProvider};
+use iroh::{SecretKey, discovery::static_provider::StaticProvider, endpoint::presets};
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_tickets::endpoint::EndpointTicket;
 use snafu::Snafu;
@@ -105,7 +105,7 @@ impl Db {
         let key = SecretKey::generate(&mut rand::rng());
         let endpoint_id = key.public();
         let sp = StaticProvider::new();
-        let endpoint = iroh::Endpoint::builder()
+        let endpoint = iroh::Endpoint::builder(presets::N0)
             .secret_key(key.clone())
             .discovery(sp.clone())
             .bind()

@@ -6,15 +6,15 @@ edition = "2024"
 [dependencies]
 iroh-smol-kv-uniffi = { version = "0.3.0", path = "../iroh-smol-kv-uniffi" }
 bytes = "1"
-iroh = "0.95"
-iroh-gossip = "0.95"
-irpc = "0.11"
-n0-future = "0.2"
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+irpc = { workspace = true }
+n0-future = { workspace = true }
 snafu = "0.8"
 tokio = "1.47"
 uniffi = "0.28"
 iroh-smol-kv = { version = "0.3.1", path = ".." }
-iroh-tickets = "0.2.0"
+iroh-tickets = { workspace = true }
 rand = "0.9"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 

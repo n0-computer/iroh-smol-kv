@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use bytes::Bytes;
 use clap::Parser;
-use iroh::{PublicKey, SecretKey, discovery::static_provider::StaticProvider};
+use iroh::{PublicKey, SecretKey, address_lookup::MemoryLookup, endpoint::presets};
 use iroh_gossip::{net::Gossip, proto::TopicId};
 use iroh_smol_kv::{
     Client, Config, Filter, Subscribe, SubscribeItem, SubscribeMode, SubscribeResponse,
@@ -85,9 +85,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let key = SecretKey::generate(&mut rand::rng());
     let node_id = key.public();
-    let sp = StaticProvider::new();
-    let endpoint = iroh::Endpoint::builder()
-        .discovery(sp.clone())
+    let sp = MemoryLookup::new();
+    let endpoint = iroh::Endpoint::builder(presets::N0)
+        .address_lookup(sp.clone())
         .secret_key(key.clone())
         .bind()
         .await?;

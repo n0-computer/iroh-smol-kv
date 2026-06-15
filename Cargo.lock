@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-smol-kv"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-smol-kv-uniffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "iroh",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-example"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "iroh",

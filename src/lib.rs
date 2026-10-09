@@ -728,8 +728,8 @@ impl Actor {
             self.sender.clone(),
             self.config.anti_entropy_interval,
         );
-        let horizon_period = match self.horizon() {
-            Some(_) => Duration::from_secs(30),
+        let horizon_period = match &self.config.expiry {
+            Some(expiry) => expiry.check_interval,
             None => Duration::MAX,
         };
         let apply_horizon = Box::pin(tokio::time::sleep(horizon_period));

@@ -1,7 +1,7 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
 use iroh::SecretKey;
-use iroh_gossip::api::GossipTopic;
+use iroh_gossip::GossipTopic;
 use iroh_smol_kv::{self as w};
 use n0_future::{Stream, StreamExt};
 use snafu::Snafu;

@@ -23,7 +23,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use iroh::{EndpointId, PublicKey, SecretKey, Signature};
-use iroh_gossip::api::{Event, GossipReceiver, GossipSender, GossipTopic};
+use iroh_gossip::{Event, GossipReceiver, GossipSender, GossipTopic};
 use irpc::{
     channel::{mpsc, oneshot},
     rpc_requests,
@@ -637,7 +637,7 @@ impl Actor {
         snapshot: State,
         sender: GossipSender,
         total: Duration,
-    ) -> Result<(), iroh_gossip::api::ApiError> {
+    ) -> Result<(), iroh_gossip::Error> {
         trace!(
             "Starting anti-entropy with {} items for {:?}",
             snapshot.flatten().count(),

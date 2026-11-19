@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use iroh::{SecretKey, address_lookup::MemoryLookup, endpoint::presets};
-use iroh_gossip::{net::Gossip, proto::TopicId};
+use iroh_gossip::{Gossip, TopicId};
 use iroh_smol_kv::{Client, Config};
 use iroh_tickets::endpoint::EndpointTicket;
 use n0_error::{Result, StdResultExt};
@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     trace!("Starting iroh-gossip example");
     let args = Args::parse();
-    let key = SecretKey::generate(&mut rand::rng());
+    let key = SecretKey::generate();
     let node_id = key.public();
     let sp = MemoryLookup::new();
     let endpoint = iroh::Endpoint::builder(presets::N0)

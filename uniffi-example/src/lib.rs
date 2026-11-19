@@ -102,7 +102,7 @@ impl Db {
             .with_thread_ids(true)
             .with_thread_names(true)
             .init();
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         let endpoint_id = key.public();
         let sp = StaticProvider::new();
         let endpoint = iroh::Endpoint::builder(presets::N0)

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use bytes::Bytes;
 use clap::Parser;
 use iroh::{PublicKey, SecretKey, address_lookup::MemoryLookup, endpoint::presets};
-use iroh_gossip::{net::Gossip, proto::TopicId};
+use iroh_gossip::{Gossip, TopicId};
 use iroh_smol_kv::{
     Client, Config, Filter, Subscribe, SubscribeItem, SubscribeMode, SubscribeResponse,
     util::format_bytes,
@@ -83,7 +83,7 @@ async fn handle_subscription(id: usize, sub: SubscribeResponse) {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let key = SecretKey::generate(&mut rand::rng());
+    let key = SecretKey::generate();
     let node_id = key.public();
     let sp = MemoryLookup::new();
     let endpoint = iroh::Endpoint::builder(presets::N0)
